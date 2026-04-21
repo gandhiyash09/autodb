@@ -17,6 +17,85 @@ st.title("AutoDB: Adaptive E-Commerce Query Optimizer")
 
 tab1, tab2 = st.tabs(["E-Commerce Analytics", "Optimizer Engine"])
 
+def _strip_single_trailing_semicolon(sql_text):
+    cleaned = sql_text.strip()
+    if cleaned.endswith(";"):
+        cleaned = cleaned[:-1].rstrip()
+    return cleaned
+
+def _has_multiple_statements(sql_text):
+    in_single = False
+    in_double = False
+    in_backtick = False
+    in_line_comment = False
+    in_block_comment = False
+    i = 0
+
+    while i < len(sql_text):
+        ch = sql_text[i]
+        nxt = sql_text[i + 1] if i + 1 < len(sql_text) else ""
+
+        if in_line_comment:
+            if ch in "\r\n":
+                in_line_comment = False
+        elif in_block_comment:
+            if ch == "*" and nxt == "/":
+                in_block_comment = False
+                i += 1
+        elif in_single:
+            if ch == "'" and (i == 0 or sql_text[i - 1] != "\\"):
+                in_single = False
+        elif in_double:
+            if ch == '"' and (i == 0 or sql_text[i - 1] != "\\"):
+                in_double = False
+        elif in_backtick:
+            if ch == "`":
+                in_backtick = False
+        else:
+            if ch == "-" and nxt == "-":
+                in_line_comment = True
+                i += 1
+            elif ch == "#":
+                in_line_comment = True
+            elif ch == "/" and nxt == "*":
+                in_block_comment = True
+                i += 1
+            elif ch == "'":
+                in_single = True
+            elif ch == '"':
+                in_double = True
+            elif ch == "`":
+                in_backtick = True
+            elif ch == ";":
+                return True
+        i += 1
+
+    return False
+
+def _is_explain_result(column_names):
+    explain_cols = {
+        "id",
+        "select_type",
+        "table",
+        "type",
+        "possible_keys",
+        "key",
+        "key_len",
+        "ref",
+        "rows",
+        "filtered",
+        "extra",
+        "partitions",
+    }
+    col_set = {str(col).lower() for col in column_names}
+    if "query_block" in col_set:
+        return True
+    return len(col_set.intersection(explain_cols)) >= 5
+
+def _is_read_query(sql_text):
+    upper_q = sql_text.lstrip().upper()
+    return upper_q.startswith(("SELECT", "WITH", "SHOW", "DESCRIBE", "DESC"))
+
 def run_query(query_str):
     conn = get_connection()
     # Using dictionary=True makes it much easier to display in Streamlit
@@ -26,58 +105,51 @@ def run_query(query_str):
     status_msg = None
     
     try:
-        clean_q = query_str.strip()
-        # Prevent multiple SQL statements
-        if ';' in clean_q[:-1]:
+        clean_q = _strip_single_trailing_semicolon(query_str)
+        if _has_multiple_statements(clean_q):
             raise Exception("Multiple statements not supported")
-            
-        cursor.execute("CALL optimized_execute(%s)", (query_str,))
-        
-        # Loop through ALL result sets
+
+        cursor.execute("CALL optimized_execute(%s)", (clean_q,))
+
+        # Loop through ALL result sets from the optimizer path
         for result in cursor.stored_results():
-            cols = result.column_names
+            cols = list(result.column_names or [])
             if not cols:
                 continue
-                
-            col_set = set(cols)
-            is_explain = False
-            
-            if 'query_block' in col_set:
-                is_explain = True
-                
-            explain_cols = {'id', 'select_type', 'table', 'partitions', 'type', 'possible_keys', 'key', 'key_len', 'ref', 'rows', 'filtered', 'Extra'}
-            if len(col_set.intersection(explain_cols)) >= 4:
-                is_explain = True
-                
-            if not is_explain and final_df is None:
-                try:
-                    rows = result.fetchall()
-                    final_df = pd.DataFrame(rows, columns=cols)
-                except Exception:
-                    pass
-                
+
+            if _is_explain_result(cols):
+                result.fetchall()
+                continue
+
+            if final_df is None:
+                rows = result.fetchall()
+                final_df = pd.DataFrame(rows, columns=cols)
+
         # Forcefully flush any hidden buffers
         while cursor.nextset():
             pass
-                
+
         # CRITICAL: We must commit for logs
         conn.commit()
 
         if final_df is None:
-            affected = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
-            q_upper = query_str.strip().upper()
-            if q_upper.startswith(('INSERT', 'UPDATE', 'DELETE', 'REPLACE')):
+            q_upper = clean_q.lstrip().upper()
+            if q_upper.startswith(("INSERT", "UPDATE", "DELETE", "REPLACE")):
+                affected = cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else 0
                 status_msg = f"Query executed successfully. {affected} rows affected."
-            elif not q_upper.startswith('SELECT'):
+            elif q_upper.startswith(("CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "USE", "SET", "CALL")):
+                status_msg = "Query executed successfully."
+            elif not q_upper.startswith(("SELECT", "WITH", "SHOW", "DESCRIBE", "DESC")):
                 status_msg = "Query executed successfully."
 
         # Fetch exact metrics for the live run profiling using a separate cursor
         metrics_cursor = conn.cursor(dictionary=True)
-        metrics_cursor.execute("SELECT execution_time, plan_choice, estimated_cost FROM query_log ORDER BY query_id DESC LIMIT 1")
+        metrics_cursor.execute(
+            "SELECT execution_time, plan_choice, estimated_cost "
+            "FROM query_log ORDER BY created_at DESC, query_id DESC LIMIT 1"
+        )
         try:
-            metrics_data = metrics_cursor.fetchall()
-            if metrics_data:
-                run_metrics = metrics_data[0]
+            run_metrics = metrics_cursor.fetchone()
             # Flush buffers from this fetch
             while metrics_cursor.nextset(): 
                 pass
@@ -105,7 +177,7 @@ def run_query(query_str):
     return final_df, run_metrics, status_msg
 
 def display_results(metrics, is_custom=False):
-    if metrics:
+    if metrics is not None:
         if is_custom:
             st.success("Query Intercepted and Executed by AutoDB")
         col1, col2, col3 = st.columns(3)
@@ -130,7 +202,7 @@ with tab1:
             elif status1:
                 st.success(status1)
         except Exception as e:
-            st.error(f"Database execution error: {e}")
+            st.error(f"Database error: {e}")
         
     q2 = "SELECT p.product_name, w.warehouse_name, SUM(f.revenue) AS total_revenue, COUNT(*) AS order_count FROM order_fact f JOIN product_dim p ON f.product_id = p.product_id JOIN warehouse_dim w ON f.warehouse_id = w.warehouse_id GROUP BY p.product_name, w.warehouse_name"
     if st.button("Revenue by Product & Warehouse (JOIN)"):
@@ -142,7 +214,7 @@ with tab1:
             elif status2:
                 st.success(status2)
         except Exception as e:
-            st.error(f"Database execution error: {e}")
+            st.error(f"Database error: {e}")
         
     q3 = "SELECT d.year, SUM(f.revenue) AS total_revenue, COUNT(*) AS total_orders FROM order_fact f JOIN date_dim d ON f.date_id = d.date_id GROUP BY d.year ORDER BY d.year"
     if st.button("Annual Revenue Trend by Year"):
@@ -154,7 +226,7 @@ with tab1:
             elif status3:
                 st.success(status3)
         except Exception as e:
-            st.error(f"Database execution error: {e}")
+            st.error(f"Database error: {e}")
 
     st.markdown("---")
     st.subheader("Custom Query Execution Engine")
@@ -169,7 +241,7 @@ with tab1:
                 else:
                     st.success(status_msg if status_msg else "Query executed successfully. (0 rows returned)")
             except Exception as e:
-                st.error(f"SQL Syntax Invalid or Database Error: {e}")
+                st.error(f"Database error: {e}")
         else:
             st.warning("Please enter a query first.")
 

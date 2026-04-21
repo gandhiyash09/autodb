@@ -184,13 +184,13 @@ DELIMITER ;
 CREATE VIEW frequent_queries AS
 SELECT q.query_text, COUNT(*) AS frequency
 FROM query_log l JOIN query_master q ON l.query_id = q.query_id
-GROUP BY q.query_id
+GROUP BY q.query_id, q.query_text
 ORDER BY frequency DESC;
 
 CREATE VIEW slow_queries AS
 SELECT q.query_text, AVG(l.execution_time) AS avg_time
 FROM query_log l JOIN query_master q ON l.query_id = q.query_id
-GROUP BY q.query_id
+GROUP BY q.query_id, q.query_text
 ORDER BY avg_time DESC;
 
 CREATE VIEW heavy_queries AS
@@ -202,10 +202,14 @@ ORDER BY sq.avg_time DESC;
 CREATE VIEW query_performance AS
 SELECT q.query_text, COUNT(*) AS executions, AVG(l.execution_time) AS avg_time
 FROM query_log l JOIN query_master q ON l.query_id = q.query_id
-GROUP BY q.query_id;
+GROUP BY q.query_id, q.query_text;
 
 CREATE VIEW selectivity_stats AS
-SELECT table_name, column_name, distinct_values / total_rows AS selectivity
+SELECT table_name, column_name,
+    CASE
+        WHEN total_rows = 0 THEN 0
+        ELSE distinct_values / total_rows
+    END AS selectivity
 FROM column_stats;
 
 CREATE VIEW workload_summary AS
@@ -217,7 +221,7 @@ SELECT
     AVG(l.estimated_cost) AS avg_cost
 FROM query_log l
 JOIN query_master q ON l.query_id = q.query_id
-GROUP BY q.query_id;
+GROUP BY q.query_id, q.query_text;
 
 CREATE VIEW optimizer_view AS
 SELECT
@@ -246,9 +250,9 @@ SELECT
     execution_count AS frequency,
     avg_time,
     CASE
-        WHEN fingerprint = 'F1' AND avg_time > 0.005
+        WHEN fingerprint = MD5('F1') AND avg_time > 0.005
             THEN 'CREATE INDEX idx_product_id ON order_fact(product_id)'
-        WHEN fingerprint IN ('G1', 'G2') AND execution_count > 5
+        WHEN fingerprint IN (MD5('G1'), MD5('G2')) AND execution_count > 5
             THEN 'CREATE INDEX idx_group_product ON order_fact(product_id)'
         ELSE 'LOW_PRIORITY'
     END AS recommendation
@@ -287,7 +291,7 @@ FROM query_feedback
 ORDER BY executions DESC;
 
 CREATE VIEW learned_best_plan AS
-SELECT query_id, plan_choice, min(avg_execution_time) as best_time
+SELECT query_id, ANY_VALUE(plan_choice) AS plan_choice, MIN(avg_execution_time) AS best_time
 FROM query_feedback
 GROUP BY query_id;
 
@@ -463,14 +467,13 @@ BEGIN
     SET @start_time = NOW(6);
     
     IF final_plan = 'USE_MV' THEN
-        SELECT * FROM product_revenue_mv;
         UPDATE mv_metadata SET usage_count = usage_count + 1 WHERE mv_name = 'product_revenue_mv';
-    ELSE
-        SET @sql = q;
-        PREPARE stmt FROM @sql;
-        EXECUTE stmt;
-        DEALLOCATE PREPARE stmt;
     END IF;
+
+    SET @sql = q;
+    PREPARE stmt FROM @sql;
+    EXECUTE stmt;
+    DEALLOCATE PREPARE stmt;
 
     SET @end_time = NOW(6);
     SET exec_time = ROUND(TIMESTAMPDIFF(MICROSECOND, @start_time, @end_time) / 1000000.0, 6);

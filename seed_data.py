@@ -18,6 +18,11 @@ def generate_data():
     cursor.execute("TRUNCATE TABLE product_dim;")
     cursor.execute("TRUNCATE TABLE warehouse_dim;")
     cursor.execute("TRUNCATE TABLE date_dim;")
+    cursor.execute("TRUNCATE TABLE query_log;")
+    cursor.execute("TRUNCATE TABLE query_feedback;")
+    cursor.execute("TRUNCATE TABLE workload_stats;")
+    cursor.execute("TRUNCATE TABLE column_stats;")
+    cursor.execute("TRUNCATE TABLE correlation_stats;")
     
     cursor.execute("TRUNCATE TABLE product_revenue_mv;")
     cursor.execute("TRUNCATE TABLE product_warehouse_mv;")
