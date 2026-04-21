@@ -100,8 +100,8 @@ def run_query(query_str):
 
         metrics_cursor = conn.cursor(dictionary=True)
         metrics_cursor.execute(
-            "SELECT actual_execution_time as execution_time, plan_choice, estimated_cost, explanation "
-            "FROM query_log ORDER BY created_at DESC, query_id DESC LIMIT 1"
+            "SELECT execution_time, plan_choice, cost as estimated_cost "
+            "FROM query_log ORDER BY created_at DESC, id DESC LIMIT 1"
         )
         try:
             run_metrics = metrics_cursor.fetchone()
@@ -204,51 +204,43 @@ with tab2:
         c_p, c_t = st.columns(2)
         with c_p:
             st.subheader("Plan Choice Distribution")
-            if not full_query_log.empty:
+            if not full_query_log.empty and "plan_choice" in full_query_log.columns:
                 plan_counts = full_query_log.groupby("plan_choice", as_index=False).size().rename(columns={"size": "count"})
                 plan_fig = px.bar(plan_counts, x="plan_choice", y="count", title="Plan Routing Volume")
                 st.plotly_chart(plan_fig, use_container_width=True)
-            else: st.info("No plan data available yet.")
-        with c_t:
-            st.subheader("Query Type Classification")
-            if not full_query_log.empty:
-                type_counts = full_query_log.groupby("query_type", as_index=False).size().rename(columns={"size": "count"})
-                type_fig = px.pie(type_counts, names="query_type", values="count", title="Workload Topology", hole=0.4)
-                st.plotly_chart(type_fig, use_container_width=True)
-            else: st.info("No queries classified.")
+            else: st.info("No plan data available yet. Please run backend/workload_generator.py to initialize.")
             
         st.markdown("---")
 
         st.subheader("Top 5 Slow Queries")
         try:
             sc = get_connection()
-            slow_q = pd.read_sql("SELECT q.query_text, l.actual_execution_time, l.chosen_plan, l.explanation FROM query_log l JOIN query_master q ON l.query_id = q.query_id ORDER BY l.actual_execution_time DESC LIMIT 5", sc)
-            st.dataframe(slow_q, use_container_width=True)
+            slow_q = pd.read_sql("SELECT query_text, execution_time, plan_choice FROM query_log ORDER BY execution_time DESC LIMIT 5", sc)
+            if not slow_q.empty:
+                st.dataframe(slow_q, use_container_width=True)
             sc.close()
         except: pass
         
         st.markdown("---")
         
         st.subheader("Why Plan Changed (Insights)")
-        if not full_query_log.empty:
+        if not full_query_log.empty and "plan_choice" in full_query_log.columns:
             changes = []
-            for qid, group in full_query_log.groupby('query_id'):
-                plans = group['chosen_plan'].tolist()
+            for qtxt, group in full_query_log.groupby('query_text'):
+                plans = group['plan_choice'].tolist()
                 for i in range(1, len(plans)):
                     if plans[i] != plans[i-1] and plans[i-1] != 'BASELINE':
-                        changes.append(f"Plan changed from **{plans[i-1]}** to **{plans[i]}** due to improved cost estimate for query ID: {qid}")
+                        changes.append(f"Plan changed from **{plans[i-1]}** to **{plans[i]}** due to improved cost estimate for query.")
             if changes:
                 for c in changes[-5:]: # Surface top recent changes
                     st.success(c)
             else:
-                st.write("No dynamic plan mutations locked yet. System still gathering baselines.")
-                
-        st.markdown("---")
+                st.info("No queries found yet.")
         
         st.subheader("Plan Evolution Over Time")
-        if not full_query_log.empty:
+        if not full_query_log.empty and "plan_choice" in full_query_log.columns:
             full_query_log['run_index'] = full_query_log.reset_index().index
-            fig_evo = px.scatter(full_query_log, x='run_index', y='actual_execution_time', color='chosen_plan', title="Execution Timing & Plan Shift Progression")
+            fig_evo = px.scatter(full_query_log, x='run_index', y='execution_time', color='plan_choice', title="Execution Timing & Plan Shift Progression")
             st.plotly_chart(fig_evo, use_container_width=True)
         
         st.markdown("---")
@@ -263,8 +255,8 @@ with tab2:
         
         st.markdown("---")
         st.subheader("Comprehensive Query AI Logs")
-        if not full_query_log.empty:
-            view_logs = full_query_log[['actual_execution_time', 'chosen_plan', 'estimated_cost', 'explanation']]
+        if not full_query_log.empty and "plan_choice" in full_query_log.columns:
+            view_logs = full_query_log[['execution_time', 'plan_choice', 'cost']]
             st.dataframe(view_logs, use_container_width=True)
             
     except Exception as e:

@@ -38,12 +38,9 @@ BEGIN
     SET @qnorm = LOWER(TRIM(REPLACE(REPLACE(q, '\n', ' '), '\t', ' ')));
     SET @qnorm = REGEXP_REPLACE(@qnorm, '[0-9]+(\\.[0-9]+)?', '?');
     SET @qnorm = REGEXP_REPLACE(@qnorm, '\'.*?\'', '?');
-    SET @fingerprint = MD5(@qnorm);
-    INSERT IGNORE INTO query_master(query_text, query_hash) VALUES (q, @fingerprint);
-    SELECT query_id INTO v_qid FROM query_master WHERE query_hash = @fingerprint LIMIT 1;
     
-    INSERT INTO query_log (query_id, chosen_plan, normal_execution_time, actual_execution_time, query_type, explanation)
-    VALUES (v_qid, 'BASELINE', end_t - start_t, end_t - start_t, 'N/A', 'Natively executed to establish baseline timing.');
+    INSERT INTO query_log (query_text, plan_choice, execution_time, cost, explain_rows, explain_key, explain_type, error_msg)
+    VALUES (q, 'FULL_SCAN', end_t - start_t, 0.0, 0, 'NONE', 'ALL', '');
 END$$
 
 -- ==========================================
@@ -51,7 +48,6 @@ END$$
 -- ==========================================
 CREATE PROCEDURE optimized_execute(IN q TEXT, IN exp_rows INT, IN exp_key VARCHAR(50), IN exp_type VARCHAR(50))
 BEGIN
-    DECLARE v_qid INT;
     DECLARE v_mv_name VARCHAR(50) DEFAULT NULL;
     DECLARE v_is_aggregate BOOLEAN DEFAULT FALSE;
     DECLARE v_has_filter BOOLEAN DEFAULT FALSE;
@@ -92,9 +88,9 @@ BEGIN
         GET DIAGNOSTICS CONDITION 1 v_error_msg = MESSAGE_TEXT;
         ROLLBACK;
         INSERT INTO query_log (
-            query_id, chosen_plan, estimated_cost, explanation, error_msg, query_type, explain_rows, explain_key, explain_type
+            query_text, plan_choice, cost, execution_time, explain_rows, explain_key, explain_type, error_msg
         ) VALUES (
-            v_qid, final_plan, chosen_cost, 'Execution natively aborted. Error triggered.', v_error_msg, qtype, exp_rows, exp_key, exp_type
+            q, IFNULL(final_plan, 'FAILED'), chosen_cost, 0.0, exp_rows, exp_key, exp_type, v_error_msg
         );
         RESIGNAL;
     END;
@@ -121,10 +117,6 @@ BEGIN
     VALUES (@fingerprint, 1, 0, 0, 'PENDING')
     ON DUPLICATE KEY UPDATE execution_count = execution_count + 1;
     SELECT execution_count INTO exec_count FROM workload_stats WHERE fingerprint = @fingerprint;
-
-    -- Register text
-    INSERT IGNORE INTO query_master(query_text, query_hash) VALUES (q, @fingerprint);
-    SELECT query_id INTO v_qid FROM query_master WHERE query_hash = @fingerprint LIMIT 1;
 
     -- CLASSIFICATION
     IF @qnorm LIKE '%group by%' THEN 
@@ -199,26 +191,25 @@ BEGIN
     END IF;
 
     -- EXPLICIT COMPETITION LOOP
-    SET chosen_cost = cost_full;
-    SET final_plan = 'FULL_SCAN';
-    SET v_explanation = 'FULL_SCAN selected due to lack of useful index and high cardinality';
+    SET final_plan = CASE
+      WHEN cost_full <= cost_index AND cost_full <= cost_mv AND cost_full <= cost_agg THEN 'FULL_SCAN'
+      WHEN cost_index <= cost_full AND cost_index <= cost_mv AND cost_index <= cost_agg THEN 'INDEX_SCAN'
+      WHEN cost_mv <= cost_full AND cost_mv <= cost_index AND cost_mv <= cost_agg THEN 'USE_MV'
+      ELSE 'AGGREGATE_PUSHDOWN'
+    END;
 
-    IF v_has_filter AND cost_index < chosen_cost THEN
+    IF final_plan IS NULL OR final_plan = '' THEN
+      SET final_plan = 'FULL_SCAN';
+    END IF;
+
+    IF final_plan = 'FULL_SCAN' THEN
+        SET chosen_cost = cost_full;
+    ELSEIF final_plan = 'INDEX_SCAN' THEN
         SET chosen_cost = cost_index;
-        SET final_plan = 'INDEX_SCAN';
-        SET v_explanation = 'INDEX_SCAN selected due to high selectivity and lower estimated cost than FULL_SCAN';
-    END IF;
-
-    IF v_is_aggregate AND cost_agg < chosen_cost THEN
-        SET chosen_cost = cost_agg;
-        SET final_plan = 'AGGREGATE_PUSHDOWN';
-        SET v_explanation = 'AGGREGATE_PUSHDOWN selected. GROUP BY operations explicitly cheaper calculated at the engine layer.';
-    END IF;
-
-    IF v_mv_name IS NOT NULL AND cost_mv < chosen_cost THEN
+    ELSEIF final_plan = 'USE_MV' THEN
         SET chosen_cost = cost_mv;
-        SET final_plan = 'USE_MV';
-        SET v_explanation = 'USE_MV selected due to precomputed aggregation and lower scan cost';
+    ELSE
+        SET chosen_cost = cost_agg;
     END IF;
 
     -- EXECUTE PLAN
@@ -292,7 +283,7 @@ BEGIN
     SET avg_execution_time = v_new_avg, multiplier = v_new_mult 
     WHERE plan_name = final_plan;
 
-    IF v_qid % 100 = 0 THEN
+    IF (SELECT COUNT(*) FROM query_log) % 100 = 0 THEN
         UPDATE plan_cost_model SET multiplier = multiplier * 0.9 + 1.0 * 0.1 WHERE plan_name = 'FULL_SCAN';
         UPDATE plan_cost_model SET multiplier = multiplier * 0.9 + 0.2 * 0.1 WHERE plan_name = 'INDEX_SCAN';
         UPDATE plan_cost_model SET multiplier = multiplier * 0.9 + 0.05 * 0.1 WHERE plan_name = 'USE_MV';
@@ -300,16 +291,12 @@ BEGIN
     END IF;
 
     -- LOGGING
-    INSERT INTO query_log (query_id, estimated_cost, actual_execution_time, chosen_plan, used_index, used_mv, query_type, explanation, explain_rows, explain_key, explain_type, error_msg)
+    INSERT INTO query_log (query_text, plan_choice, execution_time, cost, explain_rows, explain_key, explain_type, error_msg)
     VALUES (
-        v_qid, 
-        chosen_cost, 
+        q, 
+        IFNULL(final_plan, 'FAILED'), 
         run_time, 
-        final_plan, 
-        CASE WHEN final_plan = 'INDEX_SCAN' THEN TRUE ELSE FALSE END,
-        CASE WHEN final_plan = 'USE_MV' THEN TRUE ELSE FALSE END,
-        qtype,
-        v_explanation,
+        chosen_cost, 
         exp_rows,
         exp_key,
         exp_type,

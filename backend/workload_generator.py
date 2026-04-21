@@ -124,7 +124,7 @@ def generate_workload(conn, cursor):
                 dict_cursor.execute(f"EXPLAIN {q}")
                 exp_res = dict_cursor.fetchall()
                 if exp_res:
-                    exp_rows = exp_res[0].get('rows') or 0
+                    exp_rows = exp_res[0].get('rows') or 1000
                     exp_key = str(exp_res[0].get('key') or 'NONE')
                     exp_type = str(exp_res[0].get('type') or 'ALL')
                 while dict_cursor.nextset(): pass
@@ -140,13 +140,7 @@ def generate_workload(conn, cursor):
             
     conn.commit()
     
-    # Auto-link baseline normal times to the optimized rows for the dashboard!
-    cursor.execute("""
-        UPDATE query_log q_opt 
-        JOIN query_log q_base ON q_opt.query_id = q_base.query_id AND q_base.chosen_plan = 'BASELINE'
-        SET q_opt.normal_execution_time = q_base.actual_execution_time
-        WHERE q_opt.chosen_plan != 'BASELINE'
-    """)
+    # (Baseline normalization to execution_time dropped as per strict schema enforcement)
     conn.commit()
     print("Workload training generation complete!")
 

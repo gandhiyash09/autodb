@@ -41,28 +41,17 @@ CREATE TABLE order_fact (
 -- ==========================================
 -- STEP 2: METADATA TABLES
 -- ==========================================
-CREATE TABLE query_master (
-    query_id INT AUTO_INCREMENT PRIMARY KEY,
-    query_text TEXT,
-    query_hash VARCHAR(64) UNIQUE
-);
-
 CREATE TABLE query_log (
-    query_id INT,
-    estimated_cost DOUBLE,
-    actual_execution_time DOUBLE,
-    normal_execution_time DOUBLE,
-    chosen_plan VARCHAR(50),
-    used_index BOOLEAN DEFAULT FALSE,
-    used_mv BOOLEAN DEFAULT FALSE,
-    query_type VARCHAR(50),
-    explanation TEXT,
-    explain_rows INT,
-    explain_key VARCHAR(50),
-    explain_type VARCHAR(50),
-    error_msg TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_query FOREIGN KEY (query_id) REFERENCES query_master(query_id)
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  query_text TEXT,
+  plan_choice VARCHAR(50) NOT NULL,
+  execution_time DOUBLE,
+  cost DOUBLE,
+  explain_rows INT,
+  explain_key VARCHAR(50),
+  explain_type VARCHAR(50),
+  error_msg TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE query_feedback (
