@@ -21,23 +21,34 @@ def run_query(query_str):
     conn = get_connection()
     # Using dictionary=True makes it much easier to display in Streamlit
     cursor = conn.cursor(dictionary=True)
-    final_data = []
+    final_df = None
     run_metrics = None
     
     try:
-        # We replace single quotes in the query string to prevent SQL syntax crashes
-        safe_query = query_str.replace("'", "''")
-        cursor.execute(f"CALL optimized_execute('{safe_query}')")
+        cursor.execute("CALL optimized_execute(%s)", (query_str,))
         
         # Loop through ALL result sets
         for result in cursor.stored_results():
-            try:
-                rows = result.fetchall()
-                if rows:
-                    if 'EXPLAIN' not in result.column_names and 'query_block' not in result.column_names:
-                        final_data = rows 
-            except Exception:
-                pass
+            cols = result.column_names
+            if not cols:
+                continue
+                
+            col_set = set(cols)
+            is_explain = False
+            
+            if 'query_block' in col_set:
+                is_explain = True
+                
+            explain_cols = {'id', 'select_type', 'table', 'partitions', 'type', 'possible_keys', 'key', 'key_len', 'ref', 'rows', 'filtered', 'Extra'}
+            if len(col_set.intersection(explain_cols)) >= 4:
+                is_explain = True
+                
+            if not is_explain and final_df is None:
+                try:
+                    rows = result.fetchall()
+                    final_df = pd.DataFrame(rows, columns=cols)
+                except Exception:
+                    pass
                 
         # Forcefully flush any hidden buffers
         while cursor.nextset():
@@ -46,17 +57,20 @@ def run_query(query_str):
         # CRITICAL: We must commit for logs
         conn.commit()
 
-        # Fetch exact metrics for the live run profiling
-        cursor.execute("SELECT execution_time, plan_choice, estimated_cost FROM query_log ORDER BY query_id DESC LIMIT 1")
+        # Fetch exact metrics for the live run profiling using a separate cursor
+        metrics_cursor = conn.cursor(dictionary=True)
+        metrics_cursor.execute("SELECT execution_time, plan_choice, estimated_cost FROM query_log ORDER BY query_id DESC LIMIT 1")
         try:
-            metrics_data = cursor.fetchall()
+            metrics_data = metrics_cursor.fetchall()
             if metrics_data:
                 run_metrics = metrics_data[0]
             # Flush buffers from this fetch
-            while cursor.nextset(): 
+            while metrics_cursor.nextset(): 
                 pass
         except Exception:
             pass
+        finally:
+            metrics_cursor.close()
         
     except Exception as e:
         # Re-raise so the frontend can catch and display the SQL error gracefully
@@ -74,7 +88,7 @@ def run_query(query_str):
         if conn.is_connected():
             conn.close()
             
-    return final_data, run_metrics
+    return final_df, run_metrics
 
 def display_results(metrics, is_custom=False):
     if metrics:
@@ -97,7 +111,7 @@ with tab1:
         try:
             data1, metrics1 = run_query(q1)
             display_results(metrics1)
-            if data1:
+            if data1 is not None and len(data1.columns) > 0:
                 st.dataframe(data1, use_container_width=True)
         except Exception as e:
             st.error(f"Database execution error: {e}")
@@ -107,7 +121,7 @@ with tab1:
         try:
             data2, metrics2 = run_query(q2)
             display_results(metrics2)
-            if data2:
+            if data2 is not None and len(data2.columns) > 0:
                 st.dataframe(data2, use_container_width=True)
         except Exception as e:
             st.error(f"Database execution error: {e}")
@@ -117,7 +131,7 @@ with tab1:
         try:
             data3, metrics3 = run_query(q3)
             display_results(metrics3)
-            if data3:
+            if data3 is not None and len(data3.columns) > 0:
                 st.dataframe(data3, use_container_width=True)
         except Exception as e:
             st.error(f"Database execution error: {e}")
@@ -130,7 +144,7 @@ with tab1:
             try:
                 custom_data, custom_metrics = run_query(custom_q)
                 display_results(custom_metrics, is_custom=True)
-                if custom_data:
+                if custom_data is not None and len(custom_data.columns) > 0:
                     st.dataframe(custom_data, use_container_width=True)
                 else:
                     st.warning("No rows returned. (Either an empty table or a non-SELECT command like INSERT/UPDATE)")
