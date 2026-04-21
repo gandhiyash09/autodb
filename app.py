@@ -2,6 +2,8 @@ import streamlit as st
 import mysql.connector
 import pandas as pd
 import plotly.express as px
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning)
 
 st.set_page_config(layout="wide", page_title="AutoDB E-Commerce")
 
@@ -15,7 +17,7 @@ def get_connection():
     return mysql.connector.connect(
         host=db_host,
         user=db_user,
-        password=db_password,
+        password="gandhiyash09",
         database=db_name
     )
 
@@ -24,30 +26,48 @@ st.title("AutoDB: Adaptive E-Commerce Query Optimizer")
 tab1, tab2 = st.tabs(["E-Commerce Analytics", "Optimizer Engine"])
 
 def run_query(query_str):
+    conn = get_connection()
+    # Using dictionary=True makes it much easier to display in Streamlit
+    cursor = conn.cursor(dictionary=True)
+    final_data = []
+    
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
+        # We replace single quotes in the query string to prevent SQL syntax crashes
+        safe_query = query_str.replace("'", "''")
+        cursor.execute(f"CALL optimized_execute('{safe_query}')")
         
-        cursor.execute("CALL optimized_execute(%s)", (query_str,))
-        
+        # Loop through ALL result sets
         for result in cursor.stored_results():
-            cols = [i[0] for i in result.description]
-            data = result.fetchall()
-            df = pd.DataFrame(data, columns=cols)
-            if len(cols) == 1 and cols[0] == "plan_used":
-                continue 
-            st.dataframe(df)
-
-        query_log = pd.read_sql("SELECT * FROM query_log ORDER BY created_at DESC LIMIT 1", conn)
-        st.write("### Query Log (Optimizer Output)")
-        st.dataframe(query_log)
+            try:
+                rows = result.fetchall()
+                if rows:
+                    final_data = rows 
+            except Exception:
+                pass
+                
+        # Forcefully flush any hidden buffers
+        while cursor.nextset():
+            pass
+                
+        # CRITICAL: We must commit for logs
+        conn.commit()
         
     except Exception as e:
-        st.error(f"Error executing query: {e}")
+        st.error(f"Database execution error: {e}")
     finally:
-        if 'conn' in locals() and conn.is_connected():
+        # Last safety flush loop
+        try:
+            while cursor.nextset():
+                pass
+        except Exception:
+            pass
+            
+        if cursor:
             cursor.close()
+        if conn.is_connected():
             conn.close()
+            
+    return final_data
 
 with tab1:
     st.header("Predefined Queries")
@@ -55,19 +75,52 @@ with tab1:
     
     q1 = "SELECT product_id, SUM(revenue) AS total_revenue FROM order_fact GROUP BY product_id"
     if st.button("Total Revenue by Product"):
-        run_query(q1)
+        data1 = run_query(q1)
+        st.dataframe(data1)  # <--- THIS SHOWS THE DATA
         
     q2 = "SELECT p.product_name, w.warehouse_name, SUM(f.revenue) AS total_revenue, COUNT(*) AS order_count FROM order_fact f JOIN product_dim p ON f.product_id = p.product_id JOIN warehouse_dim w ON f.warehouse_id = w.warehouse_id GROUP BY p.product_name, w.warehouse_name"
     if st.button("Revenue by Product & Warehouse (JOIN)"):
-        run_query(q2)
+        data2 = run_query(q2)
+        st.dataframe(data2)  # <--- THIS SHOWS THE DATA
         
     q3 = "SELECT d.year, SUM(f.revenue) AS total_revenue, COUNT(*) AS total_orders FROM order_fact f JOIN date_dim d ON f.date_id = d.date_id GROUP BY d.year ORDER BY d.year"
     if st.button("Annual Revenue Trend by Year"):
-        run_query(q3)
+        data3 = run_query(q3)
+        st.dataframe(data3)  # <--- THIS SHOWS THE DATA
+
+    st.markdown("---")
+    custom_q = st.text_area("Custom Query Execution Engine")
+    if st.button("Route Custom Query via AutoDB"):
+        if custom_q.strip():
+            custom_data = run_query(custom_q)
+            if custom_data:
+                st.dataframe(custom_data)
+        else:
+            st.warning("Please enter a query first.")
 
 with tab2:
     st.header("Optimizer Metrics")
-    st.info("This is the DBA View. It shows workload statistics and optimization decisions made by AutoDB.")
+    
+    col_info, col_btn = st.columns([0.8, 0.2])
+    with col_info:
+        st.info("This is the DBA View. It shows workload statistics and optimization decisions made by AutoDB.")
+    with col_btn:
+        if st.button("Reset AutoDB Memory", type="primary"):
+            try:
+                reset_conn = get_connection()
+                reset_cursor = reset_conn.cursor()
+                reset_cursor.execute("TRUNCATE query_log;")
+                reset_cursor.execute("TRUNCATE query_feedback;")
+                reset_cursor.execute("TRUNCATE workload_stats;")
+                reset_cursor.execute("UPDATE mv_metadata SET usage_count = 0, is_stale = FALSE;")
+                reset_conn.commit()
+                st.success("Memory wiped successfully!")
+            except Exception as e:
+                st.error(f"Error resetting memory: {e}")
+            finally:
+                if 'reset_conn' in locals() and reset_conn.is_connected():
+                    reset_cursor.close()
+                    reset_conn.close()
     try:
         conn = get_connection()
         workload = pd.read_sql("SELECT * FROM workload_stats", conn)

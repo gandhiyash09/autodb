@@ -460,7 +460,7 @@ BEGIN
     END IF;
 
     -- STEP 10: EXECUTION TIMER
-    SET @start = UNIX_TIMESTAMP(NOW(6)) * 1000000 + MICROSECOND(NOW(6));
+    SET @start_time = NOW(6);
     
     IF final_plan = 'USE_MV' THEN
         SELECT * FROM product_revenue_mv;
@@ -472,8 +472,12 @@ BEGIN
         DEALLOCATE PREPARE stmt;
     END IF;
 
-    SET @end = UNIX_TIMESTAMP(NOW(6)) * 1000000 + MICROSECOND(NOW(6));
-    SET exec_time = ROUND((@end - @start)/1000000, 6);
+    SET @end_time = NOW(6);
+    SET exec_time = ROUND(TIMESTAMPDIFF(MICROSECOND, @start_time, @end_time) / 1000000.0, 6);
+    
+    IF exec_time <= 0 THEN
+        SET exec_time = 0.0001;
+    END IF;
 
     -- Simulate longer scan times for large tables if FULL_SCAN
     IF final_plan = 'FULL_SCAN' THEN

@@ -7,7 +7,7 @@ def generate_data():
     conn = mysql.connector.connect(
         host="localhost",
         user="root",
-        password="", # Modify if your local setup requires a password
+        password="gandhiyash09", 
         database="autodb_ecommerce"
     )
     cursor = conn.cursor()
