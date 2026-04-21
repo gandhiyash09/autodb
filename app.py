@@ -34,7 +34,8 @@ def run_query(query_str):
             try:
                 rows = result.fetchall()
                 if rows:
-                    final_data = rows 
+                    if 'EXPLAIN' not in result.column_names and 'query_block' not in result.column_names:
+                        final_data = rows 
             except Exception:
                 pass
                 
@@ -75,7 +76,7 @@ def run_query(query_str):
             
     return final_data, run_metrics
 
-def display_results(data, metrics, is_custom=False):
+def display_results(metrics, is_custom=False):
     if metrics:
         if is_custom:
             st.success("Query Intercepted and Executed by AutoDB")
@@ -86,9 +87,6 @@ def display_results(data, metrics, is_custom=False):
             st.metric("Execution Time", f"{metrics.get('execution_time', 0.0):.4f}s")
         with col3:
             st.metric("Estimated Cost", f"{metrics.get('estimated_cost', 0.0):.1f}")
-            
-    if data:
-        st.dataframe(data)
 
 with tab1:
     st.header("Predefined Queries")
@@ -98,7 +96,9 @@ with tab1:
     if st.button("Total Revenue by Product"):
         try:
             data1, metrics1 = run_query(q1)
-            display_results(data1, metrics1)
+            display_results(metrics1)
+            if data1:
+                st.dataframe(data1, use_container_width=True)
         except Exception as e:
             st.error(f"Database execution error: {e}")
         
@@ -106,7 +106,9 @@ with tab1:
     if st.button("Revenue by Product & Warehouse (JOIN)"):
         try:
             data2, metrics2 = run_query(q2)
-            display_results(data2, metrics2)
+            display_results(metrics2)
+            if data2:
+                st.dataframe(data2, use_container_width=True)
         except Exception as e:
             st.error(f"Database execution error: {e}")
         
@@ -114,7 +116,9 @@ with tab1:
     if st.button("Annual Revenue Trend by Year"):
         try:
             data3, metrics3 = run_query(q3)
-            display_results(data3, metrics3)
+            display_results(metrics3)
+            if data3:
+                st.dataframe(data3, use_container_width=True)
         except Exception as e:
             st.error(f"Database execution error: {e}")
 
@@ -125,7 +129,11 @@ with tab1:
         if custom_q.strip():
             try:
                 custom_data, custom_metrics = run_query(custom_q)
-                display_results(custom_data, custom_metrics, is_custom=True)
+                display_results(custom_metrics, is_custom=True)
+                if custom_data:
+                    st.dataframe(custom_data, use_container_width=True)
+                else:
+                    st.warning("No rows returned. (Either an empty table or a non-SELECT command like INSERT/UPDATE)")
             except Exception as e:
                 st.error(f"SQL Syntax Invalid or Database Error: {e}")
         else:
@@ -188,12 +196,12 @@ with tab2:
         
         st.subheader("Optimizer Learning Curve")
         if not full_query_log.empty:
-            full_query_log['Run Number'] = range(1, len(full_query_log) + 1)
+            full_query_log['run_number'] = full_query_log.reset_index().index + 1
             # Ensure query_id is treated purely as a category/string for distinct colors
             full_query_log['query_id'] = full_query_log['query_id'].astype(str)
             
             fig = px.line(full_query_log, 
-                          x='Run Number', 
+                          x='run_number', 
                           y='execution_time', 
                           color='query_id', 
                           symbol='plan_choice',
