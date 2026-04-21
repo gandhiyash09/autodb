@@ -5,18 +5,12 @@ import plotly.express as px
 
 st.set_page_config(layout="wide", page_title="AutoDB E-Commerce")
 
-st.sidebar.title("Configuration")
-db_host = st.sidebar.text_input("Host", "localhost")
-db_user = st.sidebar.text_input("User", "root")
-db_password = st.sidebar.text_input("Password", "", type="password")
-db_name = st.sidebar.text_input("Database", "autodb_ecommerce")
-
 def get_connection():
     return mysql.connector.connect(
-        host=db_host,
-        user=db_user,
+        host="localhost",
+        user="root",
         password="gandhiyash09",
-        database=db_name
+        database="autodb_ecommerce"
     )
 
 st.title("AutoDB: Adaptive E-Commerce Query Optimizer")
@@ -64,7 +58,8 @@ def run_query(query_str):
             pass
         
     except Exception as e:
-        st.error(f"Database execution error: {e}")
+        # Re-raise so the frontend can catch and display the SQL error gracefully
+        raise e
     finally:
         # Last safety flush loop
         try:
@@ -101,26 +96,38 @@ with tab1:
     
     q1 = "SELECT product_id, SUM(revenue) AS total_revenue FROM order_fact GROUP BY product_id"
     if st.button("Total Revenue by Product"):
-        data1, metrics1 = run_query(q1)
-        display_results(data1, metrics1)
+        try:
+            data1, metrics1 = run_query(q1)
+            display_results(data1, metrics1)
+        except Exception as e:
+            st.error(f"Database execution error: {e}")
         
     q2 = "SELECT p.product_name, w.warehouse_name, SUM(f.revenue) AS total_revenue, COUNT(*) AS order_count FROM order_fact f JOIN product_dim p ON f.product_id = p.product_id JOIN warehouse_dim w ON f.warehouse_id = w.warehouse_id GROUP BY p.product_name, w.warehouse_name"
     if st.button("Revenue by Product & Warehouse (JOIN)"):
-        data2, metrics2 = run_query(q2)
-        display_results(data2, metrics2)
+        try:
+            data2, metrics2 = run_query(q2)
+            display_results(data2, metrics2)
+        except Exception as e:
+            st.error(f"Database execution error: {e}")
         
     q3 = "SELECT d.year, SUM(f.revenue) AS total_revenue, COUNT(*) AS total_orders FROM order_fact f JOIN date_dim d ON f.date_id = d.date_id GROUP BY d.year ORDER BY d.year"
     if st.button("Annual Revenue Trend by Year"):
-        data3, metrics3 = run_query(q3)
-        display_results(data3, metrics3)
+        try:
+            data3, metrics3 = run_query(q3)
+            display_results(data3, metrics3)
+        except Exception as e:
+            st.error(f"Database execution error: {e}")
 
     st.markdown("---")
     st.subheader("Custom Query Execution Engine")
     custom_q = st.text_area("SQL Terminal: Route Raw Query via AutoDB", height=150)
     if st.button("Route Custom Query via AutoDB"):
         if custom_q.strip():
-            custom_data, custom_metrics = run_query(custom_q)
-            display_results(custom_data, custom_metrics, is_custom=True)
+            try:
+                custom_data, custom_metrics = run_query(custom_q)
+                display_results(custom_data, custom_metrics, is_custom=True)
+            except Exception as e:
+                st.error(f"SQL Syntax Invalid or Database Error: {e}")
         else:
             st.warning("Please enter a query first.")
 
@@ -157,7 +164,7 @@ with tab2:
 
     try:
         conn = get_connection()
-        full_query_log = pd.read_sql("SELECT * FROM query_log ORDER BY query_id ASC", conn)
+        full_query_log = pd.read_sql("SELECT * FROM query_log ORDER BY created_at ASC", conn)
         workload = pd.read_sql("SELECT * FROM workload_stats", conn)
         mv_meta = pd.read_sql("SELECT * FROM mv_metadata", conn)
         idx_cands = pd.read_sql("SELECT * FROM index_candidates", conn)
@@ -182,11 +189,14 @@ with tab2:
         st.subheader("Optimizer Learning Curve")
         if not full_query_log.empty:
             full_query_log['Run Number'] = range(1, len(full_query_log) + 1)
+            # Ensure query_id is treated purely as a category/string for distinct colors
+            full_query_log['query_id'] = full_query_log['query_id'].astype(str)
             
             fig = px.line(full_query_log, 
                           x='Run Number', 
                           y='execution_time', 
-                          color='plan_choice', 
+                          color='query_id', 
+                          symbol='plan_choice',
                           markers=True, 
                           title="Execution Time Evolution Across Queries")
             
