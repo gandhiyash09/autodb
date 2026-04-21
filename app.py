@@ -14,8 +14,12 @@ def get_connection():
     )
 
 st.title("AutoDB: Adaptive E-Commerce Query Optimizer")
+st.caption(
+    "SQL queries are executed directly in MySQL. "
+    "This dashboard visualizes optimizer decisions, workload statistics, and performance trends."
+)
 
-tab1, tab2 = st.tabs(["E-Commerce Analytics", "Optimizer Engine"])
+tab1, tab2 = st.tabs(["AutoDB Dashboard", "Optimizer Analytics"])
 
 def _strip_single_trailing_semicolon(sql_text):
     cleaned = sql_text.strip()
@@ -91,10 +95,6 @@ def _is_explain_result(column_names):
     if "query_block" in col_set:
         return True
     return len(col_set.intersection(explain_cols)) >= 5
-
-def _is_read_query(sql_text):
-    upper_q = sql_text.lstrip().upper()
-    return upper_q.startswith(("SELECT", "WITH", "SHOW", "DESCRIBE", "DESC"))
 
 def run_query(query_str):
     conn = get_connection()
@@ -189,8 +189,27 @@ def display_results(metrics, is_custom=False):
             st.metric("Estimated Cost", f"{metrics.get('estimated_cost', 0.0):.1f}")
 
 with tab1:
-    st.header("Predefined Queries")
-    st.info("Click a button below to run the corresponding query through the Adaptive Optimizer.")
+    st.header("AutoDB Dashboard")
+
+    st.info(
+        "Execute queries in MySQL (CLI or Workbench). "
+        "AutoDB captures execution behavior and displays optimization insights here."
+    )
+
+    st.markdown("### How to Run Queries")
+    st.code("mysql -u root -p autodb_ecommerce", language="bash")
+
+    st.caption(
+        "Run any SQL queries in the MySQL terminal. "
+        "This dashboard will automatically reflect optimizer behavior and learning."
+    )
+
+    st.markdown("---")
+
+    st.subheader("Quick Demo (Optional)")
+    st.caption("These predefined queries are only for quick testing of optimizer behavior.")
+
+    st.success("AutoDB is actively learning from query workload.")
     
     q1 = "SELECT product_id, SUM(revenue) AS total_revenue FROM order_fact GROUP BY product_id"
     if st.button("Total Revenue by Product"):
@@ -227,32 +246,19 @@ with tab1:
                 st.success(status3)
         except Exception as e:
             st.error(f"Database error: {e}")
-
     st.markdown("---")
-    st.subheader("Custom Query Execution Engine")
-    custom_q = st.text_area("SQL Terminal: Route Raw Query via AutoDB", height=150)
-    if st.button("Route Custom Query via AutoDB"):
-        if custom_q.strip():
-            try:
-                custom_data, custom_metrics, status_msg = run_query(custom_q)
-                display_results(custom_metrics, is_custom=True)
-                if custom_data is not None and len(custom_data.columns) > 0:
-                    st.dataframe(custom_data, use_container_width=True)
-                else:
-                    st.success(status_msg if status_msg else "Query executed successfully. (0 rows returned)")
-            except Exception as e:
-                st.error(f"Database error: {e}")
-        else:
-            st.warning("Please enter a query first.")
-
-    st.info("**Why We Built This:** AutoDB intercepts your raw SQL, parses it for heavy operations "
-            "(JOINs, GROUP BYs), calculates algorithmic cost, and checks workload history. If a query "
-            "is repetitive and expensive, it dynamically reroutes execution to pre-computed "
-            "Materialized Views—saving computational overhead.")
+    st.subheader("MySQL Demo")
+    st.code("mysql -u root -p autodb_ecommerce", language="bash")
+    st.write("Use the terminal for arbitrary SQL. The app stays focused on showing what the optimizer learned.")
 
 
 with tab2:
-    st.header("Optimizer Metrics")
+    st.header("Optimizer Analytics")
+
+    st.caption(
+        "This view shows how AutoDB analyzes query workload, selects execution plans, "
+        "and improves performance over time."
+    )
     
     col_info, col_btn = st.columns([0.8, 0.2])
     with col_info:
@@ -280,8 +286,10 @@ with tab2:
         conn = get_connection()
         full_query_log = pd.read_sql("SELECT * FROM query_log ORDER BY created_at ASC", conn)
         workload = pd.read_sql("SELECT * FROM workload_stats", conn)
+        feedback = pd.read_sql("SELECT * FROM query_feedback ORDER BY executions DESC", conn)
         mv_meta = pd.read_sql("SELECT * FROM mv_metadata", conn)
         idx_cands = pd.read_sql("SELECT * FROM index_candidates", conn)
+        mv_cands = pd.read_sql("SELECT * FROM mv_candidates", conn)
         
         st.subheader("System Analytics KPIs")
         if not full_query_log.empty:
@@ -317,25 +325,43 @@ with tab2:
             fig.update_layout(yaxis_title="Execution Time (s)", xaxis_title="Sequential Run Number")
             st.plotly_chart(fig, use_container_width=True)
             
-            st.subheader("Query Path Trace")
+            st.subheader("Query Log")
             st.dataframe(full_query_log[['query_id', 'plan_choice', 'execution_time', 'used_index', 'used_mv']])
         else:
             st.info("No queries have been run yet!")
 
         st.markdown("---")
+        st.subheader("Plan Choice Trends")
+        if not full_query_log.empty:
+            plan_counts = full_query_log.groupby("plan_choice", as_index=False).size().rename(columns={"size": "count"})
+            plan_fig = px.bar(plan_counts, x="plan_choice", y="count", title="Plan Choice Distribution")
+            st.plotly_chart(plan_fig, use_container_width=True)
+        else:
+            st.info("No plan data available yet.")
+
+        st.markdown("---")
+        st.subheader("Query Feedback")
+        st.dataframe(feedback, use_container_width=True)
+
+        st.markdown("---")
         st.subheader("Workload Stats")
-        st.dataframe(workload)
+        st.dataframe(workload, use_container_width=True)
                 
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("MV Metadata")
-            st.dataframe(mv_meta)
+            st.dataframe(mv_meta, use_container_width=True)
         with col2:
             st.subheader("Index Candidates")
-            st.dataframe(idx_cands)
+            st.dataframe(idx_cands, use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("MV Candidates")
+        st.dataframe(mv_cands, use_container_width=True)
             
     except Exception as e:
         st.error(f"Could not load optimizer metrics. Please ensure the database is setup and running. Error: {e}")
     finally:
         if 'conn' in locals() and conn.is_connected():
             conn.close()
+
