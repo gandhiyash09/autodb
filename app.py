@@ -23,8 +23,14 @@ def run_query(query_str):
     cursor = conn.cursor(dictionary=True)
     final_df = None
     run_metrics = None
+    status_msg = None
     
     try:
+        clean_q = query_str.strip()
+        # Prevent multiple SQL statements
+        if ';' in clean_q[:-1]:
+            raise Exception("Multiple statements not supported")
+            
         cursor.execute("CALL optimized_execute(%s)", (query_str,))
         
         # Loop through ALL result sets
@@ -57,6 +63,14 @@ def run_query(query_str):
         # CRITICAL: We must commit for logs
         conn.commit()
 
+        if final_df is None:
+            affected = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+            q_upper = query_str.strip().upper()
+            if q_upper.startswith(('INSERT', 'UPDATE', 'DELETE', 'REPLACE')):
+                status_msg = f"Query executed successfully. {affected} rows affected."
+            elif not q_upper.startswith('SELECT'):
+                status_msg = "Query executed successfully."
+
         # Fetch exact metrics for the live run profiling using a separate cursor
         metrics_cursor = conn.cursor(dictionary=True)
         metrics_cursor.execute("SELECT execution_time, plan_choice, estimated_cost FROM query_log ORDER BY query_id DESC LIMIT 1")
@@ -88,7 +102,7 @@ def run_query(query_str):
         if conn.is_connected():
             conn.close()
             
-    return final_df, run_metrics
+    return final_df, run_metrics, status_msg
 
 def display_results(metrics, is_custom=False):
     if metrics:
@@ -109,30 +123,36 @@ with tab1:
     q1 = "SELECT product_id, SUM(revenue) AS total_revenue FROM order_fact GROUP BY product_id"
     if st.button("Total Revenue by Product"):
         try:
-            data1, metrics1 = run_query(q1)
+            data1, metrics1, status1 = run_query(q1)
             display_results(metrics1)
             if data1 is not None and len(data1.columns) > 0:
                 st.dataframe(data1, use_container_width=True)
+            elif status1:
+                st.success(status1)
         except Exception as e:
             st.error(f"Database execution error: {e}")
         
     q2 = "SELECT p.product_name, w.warehouse_name, SUM(f.revenue) AS total_revenue, COUNT(*) AS order_count FROM order_fact f JOIN product_dim p ON f.product_id = p.product_id JOIN warehouse_dim w ON f.warehouse_id = w.warehouse_id GROUP BY p.product_name, w.warehouse_name"
     if st.button("Revenue by Product & Warehouse (JOIN)"):
         try:
-            data2, metrics2 = run_query(q2)
+            data2, metrics2, status2 = run_query(q2)
             display_results(metrics2)
             if data2 is not None and len(data2.columns) > 0:
                 st.dataframe(data2, use_container_width=True)
+            elif status2:
+                st.success(status2)
         except Exception as e:
             st.error(f"Database execution error: {e}")
         
     q3 = "SELECT d.year, SUM(f.revenue) AS total_revenue, COUNT(*) AS total_orders FROM order_fact f JOIN date_dim d ON f.date_id = d.date_id GROUP BY d.year ORDER BY d.year"
     if st.button("Annual Revenue Trend by Year"):
         try:
-            data3, metrics3 = run_query(q3)
+            data3, metrics3, status3 = run_query(q3)
             display_results(metrics3)
             if data3 is not None and len(data3.columns) > 0:
                 st.dataframe(data3, use_container_width=True)
+            elif status3:
+                st.success(status3)
         except Exception as e:
             st.error(f"Database execution error: {e}")
 
@@ -142,12 +162,12 @@ with tab1:
     if st.button("Route Custom Query via AutoDB"):
         if custom_q.strip():
             try:
-                custom_data, custom_metrics = run_query(custom_q)
+                custom_data, custom_metrics, status_msg = run_query(custom_q)
                 display_results(custom_metrics, is_custom=True)
                 if custom_data is not None and len(custom_data.columns) > 0:
                     st.dataframe(custom_data, use_container_width=True)
                 else:
-                    st.warning("No rows returned. (Either an empty table or a non-SELECT command like INSERT/UPDATE)")
+                    st.success(status_msg if status_msg else "Query executed successfully. (0 rows returned)")
             except Exception as e:
                 st.error(f"SQL Syntax Invalid or Database Error: {e}")
         else:
