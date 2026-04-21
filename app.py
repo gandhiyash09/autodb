@@ -15,7 +15,7 @@ def get_connection():
     return mysql.connector.connect(
         host=db_host,
         user=db_user,
-        password=db_password,
+        password="gandhiyash09",
         database=db_name
     )
 
@@ -80,8 +80,10 @@ def run_query(query_str):
             
     return final_data, run_metrics
 
-def display_results(data, metrics):
+def display_results(data, metrics, is_custom=False):
     if metrics:
+        if is_custom:
+            st.success("Query Intercepted and Executed by AutoDB")
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Plan Chosen", metrics.get('plan_choice', 'N/A'))
@@ -114,11 +116,11 @@ with tab1:
 
     st.markdown("---")
     st.subheader("Custom Query Execution Engine")
-    custom_q = st.text_area("Enter your custom SQL query block")
+    custom_q = st.text_area("SQL Terminal: Route Raw Query via AutoDB", height=150)
     if st.button("Route Custom Query via AutoDB"):
         if custom_q.strip():
             custom_data, custom_metrics = run_query(custom_q)
-            display_results(custom_data, custom_metrics)
+            display_results(custom_data, custom_metrics, is_custom=True)
         else:
             st.warning("Please enter a query first.")
 
@@ -155,31 +157,50 @@ with tab2:
 
     try:
         conn = get_connection()
+        full_query_log = pd.read_sql("SELECT * FROM query_log ORDER BY query_id ASC", conn)
         workload = pd.read_sql("SELECT * FROM workload_stats", conn)
         mv_meta = pd.read_sql("SELECT * FROM mv_metadata", conn)
         idx_cands = pd.read_sql("SELECT * FROM index_candidates", conn)
-        plan_evolve = pd.read_sql("SELECT * FROM plan_evolution_short", conn)
+        
+        st.subheader("System Analytics KPIs")
+        if not full_query_log.empty:
+            total_queries = len(full_query_log)
+            mv_hits = len(full_query_log[full_query_log['plan_choice'] == 'USE_MV'])
+            hit_ratio = (mv_hits / total_queries) * 100
+        else:
+            total_queries = 0
+            hit_ratio = 0.0
 
+        kpi1, kpi2 = st.columns(2)
+        with kpi1:
+            st.metric("Total Queries Run", total_queries)
+        with kpi2:
+            st.metric("Materialization Hit Ratio", f"{hit_ratio:.1f}%")
+        
+        st.markdown("---")
+        
+        st.subheader("Optimizer Learning Curve")
+        if not full_query_log.empty:
+            full_query_log['Run Number'] = range(1, len(full_query_log) + 1)
+            
+            fig = px.line(full_query_log, 
+                          x='Run Number', 
+                          y='execution_time', 
+                          color='plan_choice', 
+                          markers=True, 
+                          title="Execution Time Evolution Across Queries")
+            
+            fig.update_layout(yaxis_title="Execution Time (s)", xaxis_title="Sequential Run Number")
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.subheader("Query Path Trace")
+            st.dataframe(full_query_log[['query_id', 'plan_choice', 'execution_time', 'used_index', 'used_mv']])
+        else:
+            st.info("No queries have been run yet!")
+
+        st.markdown("---")
         st.subheader("Workload Stats")
         st.dataframe(workload)
-        
-        st.subheader("Plan Evolution (Learning Curve)")
-        if not plan_evolve.empty:
-            st.dataframe(plan_evolve)
-            try:
-                # Plotly chart highlighting differences in avg_execution_time grouped by plan
-                fig = px.bar(plan_evolve, 
-                             x="plan_choice", 
-                             y="avg_execution_time", 
-                             title="Average Execution Time by Plan (Lower is Better)", 
-                             color="plan_choice",
-                             text_auto='.4f')
-                
-                # Make the chart emphasize execution time visually
-                fig.update_layout(yaxis_title="Avg Execution Time (seconds)", xaxis_title="Optimizer Plan")
-                st.plotly_chart(fig)
-            except Exception:
-                pass
                 
         col1, col2 = st.columns(2)
         with col1:
