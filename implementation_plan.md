@@ -1,96 +1,49 @@
-# AutoDB: Cost-Based Optimizer & Workload Expansion Upgrade
+# AutoDB Version 3: Dynamic Adaptive Optimizer & EXPLAIN Upgrades
 
-This document outlines the comprehensive execution plan to upgrade AutoDB from a heuristic/rule-based router to a fully robust, modular cost-based optimizer (CBO) simulation suitable for an academic systems project.
-
-## Goal Description
-The objective is to replace static rule-based query routing with a dynamic cost-based model that calculates relative execution costs for different access paths (`FULL_SCAN`, `INDEX_SCAN`, `USE_MV`, `AGGREGATE_PUSHDOWN`). The system will also be expanded to support dynamic Materialized View (MV) lifecycle management (creation, tracking, and staleness refreshing), a dynamic index recommendation engine, and baseline performance comparisons via `normal_execute`. Finally, the monolithic file structure will be refactored into a clean, separated application geometry.
+This implementation plan covers the introduction of adaptive learning to the Cost-Based Optimizer (CBO), MySQL 8.0 REGEXP Query Fingerprinting, explicit plan competition enforcement, EXPLAIN metadata gathering, and further telemetry improvements to error handling and dashboard scaling.
 
 ## User Review Required
 > [!IMPORTANT]
-> **Dynamic MV Strategy:** Currently, MVs are maintained via real-time triggers. To support dynamic *creation* of MVs on-the-fly when a query hits 5 executions, we will shift to a "Refresh-on-Demand" strategy. Triggers on `order_fact` will only mark `is_stale = TRUE` in `mv_metadata`. The optimizer will then perform a standard query route while asynchronously (or synchronously) rebuilding the MV, rather than the triggers updating row-by-row on the fly. This better mimics real-world enterprise databases. Do you approve of transitioning from real-time trigger updates to a staleness + refresh-on-demand model?
+> **EXPLAIN Gathering Location:** Running `EXPLAIN` inside a MySQL stored procedure and parsing the output into local variables natively requires creating and dropping Temporary Tables continuously (`INSERT INTO temp_explain EXPLAIN...`), which adds severe simulated disk overhead and instability to the procedure. **I propose shifting the `EXPLAIN` extraction to the Python layer (`app.py` and `workload_generator.py`)**. Python will execute the `EXPLAIN` statement first, capture the `rows` and `key` values, and seamlessly pass them into the stored procedure like so: `CALL optimized_execute(query_text, explain_rows, explain_key)`. Do you approve of this approach to keep the SQL procedure clean and performant?
 
 ## Proposed Changes
 
 ---
 
-### Phase 1: Architectural Refactor
-We will decouple the monolithic files into distinct layers.
-
-#### [NEW] `sql/setup.sql`
-- Contains all base relation schemas (`order_fact`, `date_dim`, etc.)
-- Defines updated metadata tracking schemas:
-  - Add `query_explanation` and `normal_execution_time` to `query_log`
-  - Update `mv_metadata` schema (`query_fingerprint` mapped to dynamic MVs)
-  - Create tables for AI explanation logs and Index Recommendations
-
-#### [NEW] `sql/procedures.sql`
-- Contains the rewritten `optimized_execute` using new cost math.
-- Contains the new `normal_execute` which runs raw SQL natively and logs baseline time.
-- Contains dynamic MV compilation procedures `CREATE TABLE my_dynamic_mv AS SELECT...`
-
-#### [NEW] `backend/workload_generator.py`
-- Replaces `seed_data.py` with expanded scope.
-- Populates dimensions and fact tables (15,000+ rows).
-- Randomly generates between 100-300 diverse queries (Filters, Group By, Join mixed).
-- Simulates initial history execution sequentially to trigger AutoDB's dynamic threshold training prior to the UI opening.
-
-#### [NEW] `backend/optimizer_logic.py`
-- Migrates the python-specific workload analysis (such as Graph AI Explanations building) out of Streamlit into a manageable module.
-
-#### [MODIFY] `dashboard/app.py`
-- Moves existing `app.py` into a visualization sub-folder.
-- Overhauls UI to display:
-  - Baseline vs Optimized Time (Performance Improvement %)
-  - Dynamic Index Generator Recommendations
-  - Query Cost / AI Explanation block output mapped per query
-
-#### [DELETE] `database_setup.sql`, `seed_data.py`, `app.py` (Base Level)
-- Clean up the root directory and delete the monolithic prototypes.
+### [MODIFY] `sql/setup.sql` 
+- **[NEW] `plan_cost_model` table:** Will store `{plan_name, avg_execution_time, cost_multiplier}`. Initialized with baseline multipliers (1.0 for FULL_SCAN, 0.2 for INDEX_SCAN, 0.05 for USE_MV, 0.3 for AGGREGATE) and dynamically updated.
+- **[MODIFY] `query_log` table:** Add `explain_rows INT`, `explain_key VARCHAR(50)`, and `error_msg TEXT`.
 
 ---
 
-### Phase 2: Cost-Based Optimizer (CBO) Models
-
-Inside `procedures.sql`, `get_query_cost()` will be rewritten utilizing base cardinality logic spanning the 4 plan trajectories:
-- `FULL_SCAN`: `total_rows * 1.0`
-- `INDEX_SCAN`: `total_rows * selectivity * 0.2`
-- `MATERIALIZED VIEW`: `mv_rows * 0.05`
-- `AGGREGATE_PUSHDOWN`: `total_rows * 0.3`
-
-The lowest numerical valuation mandates the selected `final_plan`. `selectivity` dynamically pulls from `column_stats`.
+### [MODIFY] `sql/procedures.sql` 
+- **[MODIFY] `optimized_execute(IN q TEXT, IN exp_rows INT, IN exp_key VARCHAR(50))`:**
+  - **Adaptive Costs:** Pull dynamic multiplier rules from `plan_cost_model` rather than using static constants. After execution, `UPDATE plan_cost_model` using a rolling average of `actual_execution_time` to adjust the weight.
+  - **Literal Stripping:** Utilize MySQL 8's `REGEXP_REPLACE(q, '[0-9]+', '?')` and `REGEXP_REPLACE(q, '\'.*?\'', '?')` to completely sanitize filters, mapping structurally identical queries (`WHERE id = 5` and `WHERE id = 10`) to the EXACT same fingerprint string for superior MV thresholds.
+  - **Enforced Competition:** Always calculate `ALL` potential trajectories including `USE_MV`. `final_plan` will strictly bind to `LEAST()` matching cost integer ensuring MVs don't automatically override a computationally cheaper Index Scan if one manifests dynamically.
 
 ---
 
-### Phase 3: Dynamic View & Index Engines
-
-1. **Materialized Views:**
-   When `optimized_execute` handles a query structure that repeats > 5 times, it will spawn a dynamic materialized table (e.g., `mv_hash123`) and map it inside `mv_metadata`. 
-   If `order_fact` is inserted, all MVs flag as `is_stale = TRUE`. When queried again, AutoDB evaluates if the cost of refreshing the MV is cheaper than a `FULL_SCAN`.
-
-2. **Index Recommendations:**
-   We will update `workload_stats` and the recommendation view. When a query is highly frequent AND has high calculated `base_cost` natively, AutoDB logs a `CREATE INDEX xyz` syntactical recommendation along with pre-Index VS post-Index hypothetical cost ratios!
+### [MODIFY] `backend/workload_generator.py` 
+- Extract the `EXPLAIN` tuple mapping prior to calling the optimized routines to cleanly satisfy the signature validation.
+- Implement explicit string catch exceptions bypassing the system failure crash.
 
 ---
 
-### Phase 4: Explanation Modeler (AI Layer)
-
-For every query routed through AutoDB, a Python daemon script (or SQL conditional generator) constructs a human-readable justification logic map (`"USE_MV selected because Base Cost (5000) > MV Cost (150)"`) and writes it back to `query_log` for Streamlit to cleanly project to end users upon executing UI actions.
-
----
+### [MODIFY] `dashboard/app.py` 
+- Pre-parse `EXPLAIN` internally exactly like the workload generator does via the terminal GUI.
+- **Visuals Upgrade:** Append Top 5 Slow Queries (calculated analytically), explicit Plan Shift over time graphs, and MV usage hit patterns natively using Streamlit mapping architectures.
 
 ## Open Questions
 
-1. **Dashboard Refactoring limitations:** Should the Streamlit UI remain limited to executing *predefined* buttons simulating the generated 100-300 background queries, or do you want the interactive `Text Area` input to persist for users testing their own arbitrary injections?
-2. **Dynamic MV Mapping Constraints:** Is there a maximum threshold to how many dynamic MVs AutoDB is permitted to spawn if the workload script generates 300 highly varied aggregations? Capping the MV creation strictly at the highest repetition tiers (e.g. only 5 tables max) helps prevent database cluster clutter.
+If `plan_cost_model` multipliers drastically drift because an environmental anomaly causes an `INDEX_SCAN` pipeline to choke on local constraints (ballooning its metric above a `FULL_SCAN`), do you want a floor/ceiling threshold applied to the adaptive modifier (e.g. `multiplier` can never exceed 1.5 or drop below 0.01) so it doesn't break baseline optimization logic?
 
 ## Verification Plan
 
 ### Automated Tests
-1. Execute `backend/workload_generator.py` sequentially pushing all 300 queries.
-2. Interrogate `mv_metadata` to verify dynamic MV tables successfully spin up in MySQL post-threshold processing.
-3. Compare `normal_execution_time` vs `optimized_execution_time` averages using straight SQL extraction validation scripts.
+Execute `backend/workload_generator.py`. Visually monitor MySQL database metadata fields:
+1. `SELECT * FROM plan_cost_model` should reveal weights deviating slightly from 1.0 (adaptive learning is active).
+2. `SELECT explain_rows, explain_key FROM query_log LIMIT 10;` will confirm Python successfully bridged real trace logic into the backend CBO.
 
 ### Manual Verification
-1. Click predefined aggregate requests inside the Streamlit WebApp.
-2. Visually verify the Graph logic renders the AI generated `Explanation Text`.
-3. Check the Index Suggestion metadata table for actionable syntax.
+Launch `dashboard/app.py`. Check the 'Slow Queries' metric block, and inject custom filtered text variables to verify the fingerprint engine maps `"id = 200"` exactly identical to `"id = 99"`.

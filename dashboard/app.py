@@ -57,7 +57,22 @@ def run_query(query_str):
         if _has_multiple_statements(clean_q):
             raise Exception("Multiple statements not supported")
 
-        cursor.execute("CALL optimized_execute(%s)", (clean_q,))
+        exp_rows = 0
+        exp_key = 'NONE'
+        exp_type = 'ALL'
+        try:
+            dict_cursor = conn.cursor(dictionary=True)
+            dict_cursor.execute(f"EXPLAIN {clean_q}")
+            exp_res = dict_cursor.fetchall()
+            if exp_res:
+                exp_rows = exp_res[0].get('rows') or 0
+                exp_key = str(exp_res[0].get('key') or 'NONE')
+                exp_type = str(exp_res[0].get('type') or 'ALL')
+            while dict_cursor.nextset(): pass
+            dict_cursor.close()
+        except: pass
+
+        cursor.execute("CALL optimized_execute(%s, %s, %s, %s)", (clean_q, int(exp_rows), exp_key, exp_type))
 
         for result in cursor.stored_results():
             cols = list(result.column_names or [])
@@ -173,25 +188,69 @@ with tab2:
         st.subheader("System Analytics KPIs")
         if not full_query_log.empty:
             total_queries = len(full_query_log)
-            mv_hits = len(full_query_log[full_query_log['plan_choice'] == 'USE_MV'])
-            hit_ratio = (mv_hits / total_queries) * 100
+            mv_count = len(mv_meta) if not mv_meta.empty else 0
+            err_count = full_query_log['error_msg'].fillna('').str.len().astype(bool).sum()
         else:
-            total_queries = 0; hit_ratio = 0.0
+            total_queries = 0; mv_count = 0; err_count = 0;
 
-        k1, k2, k3 = st.columns(3)
+        k1, k2, k3, k4 = st.columns(4)
         with k1: st.metric("Total User + Training Queries", total_queries)
-        with k2: st.metric("Materialization Hit Ratio", f"{hit_ratio:.1f}%")
-        with k3: st.metric("Optimizer Speed Improvement %", f"{improvement:.1f}%")
+        with k2: st.metric("Active Materialized Views", mv_count)
+        with k3: st.metric("Avg Performance Improvement", f"{improvement:.1f}%")
+        with k4: st.metric("Secured Error Events Pipeline", err_count)
         
         st.markdown("---")
         
-        st.subheader("Plan Choice Distribution")
-        if not full_query_log.empty:
-            plan_counts = full_query_log.groupby("plan_choice", as_index=False).size().rename(columns={"size": "count"})
-            plan_fig = px.bar(plan_counts, x="plan_choice", y="count", title="Plan Routing Volume")
-            st.plotly_chart(plan_fig, use_container_width=True)
-        else: st.info("No plan data available yet.")
+        c_p, c_t = st.columns(2)
+        with c_p:
+            st.subheader("Plan Choice Distribution")
+            if not full_query_log.empty:
+                plan_counts = full_query_log.groupby("plan_choice", as_index=False).size().rename(columns={"size": "count"})
+                plan_fig = px.bar(plan_counts, x="plan_choice", y="count", title="Plan Routing Volume")
+                st.plotly_chart(plan_fig, use_container_width=True)
+            else: st.info("No plan data available yet.")
+        with c_t:
+            st.subheader("Query Type Classification")
+            if not full_query_log.empty:
+                type_counts = full_query_log.groupby("query_type", as_index=False).size().rename(columns={"size": "count"})
+                type_fig = px.pie(type_counts, names="query_type", values="count", title="Workload Topology", hole=0.4)
+                st.plotly_chart(type_fig, use_container_width=True)
+            else: st.info("No queries classified.")
+            
+        st.markdown("---")
 
+        st.subheader("Top 5 Slow Queries")
+        try:
+            sc = get_connection()
+            slow_q = pd.read_sql("SELECT q.query_text, l.actual_execution_time, l.chosen_plan, l.explanation FROM query_log l JOIN query_master q ON l.query_id = q.query_id ORDER BY l.actual_execution_time DESC LIMIT 5", sc)
+            st.dataframe(slow_q, use_container_width=True)
+            sc.close()
+        except: pass
+        
+        st.markdown("---")
+        
+        st.subheader("Why Plan Changed (Insights)")
+        if not full_query_log.empty:
+            changes = []
+            for qid, group in full_query_log.groupby('query_id'):
+                plans = group['chosen_plan'].tolist()
+                for i in range(1, len(plans)):
+                    if plans[i] != plans[i-1] and plans[i-1] != 'BASELINE':
+                        changes.append(f"Plan changed from **{plans[i-1]}** to **{plans[i]}** due to improved cost estimate for query ID: {qid}")
+            if changes:
+                for c in changes[-5:]: # Surface top recent changes
+                    st.success(c)
+            else:
+                st.write("No dynamic plan mutations locked yet. System still gathering baselines.")
+                
+        st.markdown("---")
+        
+        st.subheader("Plan Evolution Over Time")
+        if not full_query_log.empty:
+            full_query_log['run_index'] = full_query_log.reset_index().index
+            fig_evo = px.scatter(full_query_log, x='run_index', y='actual_execution_time', color='chosen_plan', title="Execution Timing & Plan Shift Progression")
+            st.plotly_chart(fig_evo, use_container_width=True)
+        
         st.markdown("---")
         
         c1, c2 = st.columns(2)

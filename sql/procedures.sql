@@ -35,13 +35,13 @@ BEGIN
     
     SET end_t = UNIX_TIMESTAMP(NOW(6));
     
-    -- Register into master if missing
     SET @qnorm = LOWER(TRIM(REPLACE(REPLACE(q, '\n', ' '), '\t', ' ')));
+    SET @qnorm = REGEXP_REPLACE(@qnorm, '[0-9]+(\\.[0-9]+)?', '?');
+    SET @qnorm = REGEXP_REPLACE(@qnorm, '\'.*?\'', '?');
     SET @fingerprint = MD5(@qnorm);
     INSERT IGNORE INTO query_master(query_text, query_hash) VALUES (q, @fingerprint);
     SELECT query_id INTO v_qid FROM query_master WHERE query_hash = @fingerprint LIMIT 1;
     
-    -- Insert baseline log (identifiable by plan 'BASELINE')
     INSERT INTO query_log (query_id, chosen_plan, normal_execution_time, actual_execution_time, query_type, explanation)
     VALUES (v_qid, 'BASELINE', end_t - start_t, end_t - start_t, 'N/A', 'Natively executed to establish baseline timing.');
 END$$
@@ -49,7 +49,7 @@ END$$
 -- ==========================================
 -- MAIN OPTIMIZER ROUTING PROCEDURE
 -- ==========================================
-CREATE PROCEDURE optimized_execute(IN q TEXT)
+CREATE PROCEDURE optimized_execute(IN q TEXT, IN exp_rows INT, IN exp_key VARCHAR(50), IN exp_type VARCHAR(50))
 BEGIN
     DECLARE v_qid INT;
     DECLARE v_mv_name VARCHAR(50) DEFAULT NULL;
@@ -68,19 +68,55 @@ BEGIN
     DECLARE chosen_cost DOUBLE;
     DECLARE final_plan VARCHAR(50);
     
+    DECLARE mult_full DOUBLE DEFAULT 1.0;
+    DECLARE mult_idx DOUBLE DEFAULT 0.2;
+    DECLARE mult_mv DOUBLE DEFAULT 0.05;
+    DECLARE mult_agg DOUBLE DEFAULT 0.3;
+    
     DECLARE exec_count INT DEFAULT 0;
     DECLARE start_t DOUBLE;
     DECLARE end_t DOUBLE;
+    DECLARE run_time DOUBLE;
     DECLARE mv_count INT DEFAULT 0;
     DECLARE v_stale BOOLEAN DEFAULT FALSE;
     DECLARE qtype VARCHAR(50) DEFAULT 'SIMPLE';
     DECLARE v_explanation TEXT;
+    
+    DECLARE v_old_avg DOUBLE;
+    DECLARE v_new_avg DOUBLE;
+    DECLARE v_new_mult DOUBLE;
+    DECLARE v_error_msg TEXT DEFAULT NULL;
+    
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        GET DIAGNOSTICS CONDITION 1 v_error_msg = MESSAGE_TEXT;
+        ROLLBACK;
+        INSERT INTO query_log (
+            query_id, chosen_plan, estimated_cost, explanation, error_msg, query_type, explain_rows, explain_key, explain_type
+        ) VALUES (
+            v_qid, final_plan, chosen_cost, 'Execution natively aborted. Error triggered.', v_error_msg, qtype, exp_rows, exp_key, exp_type
+        );
+        RESIGNAL;
+    END;
 
-    -- Normalize and Fingerprint
+    START TRANSACTION;
+
+    -- Fallback EXPLAIN rules if Python pushes null equivalent
+    IF exp_rows <= 0 THEN SET exp_rows = v_total_rows; END IF;
+
+    -- Load multipliers
+    SELECT multiplier INTO mult_full FROM plan_cost_model WHERE plan_name = 'FULL_SCAN' LIMIT 1;
+    SELECT multiplier INTO mult_idx FROM plan_cost_model WHERE plan_name = 'INDEX_SCAN' LIMIT 1;
+    SELECT multiplier INTO mult_mv FROM plan_cost_model WHERE plan_name = 'USE_MV' LIMIT 1;
+    SELECT multiplier INTO mult_agg FROM plan_cost_model WHERE plan_name = 'AGGREGATE_PUSHDOWN' LIMIT 1;
+
+    -- Normalize and Fingerprint (MySQL 8 REGEXP)
     SET @qnorm = LOWER(TRIM(REPLACE(REPLACE(q, '\n', ' '), '\t', ' ')));
+    SET @qnorm = REGEXP_REPLACE(@qnorm, '[0-9]+(\\.[0-9]+)?', '?');
+    SET @qnorm = REGEXP_REPLACE(@qnorm, '\'.*?\'', '?');
     SET @fingerprint = MD5(@qnorm);
     
-    -- Update Workload Execution Counts
+    -- Workload stats
     INSERT INTO workload_stats (fingerprint, execution_count, avg_time, avg_cost, last_plan)
     VALUES (@fingerprint, 1, 0, 0, 'PENDING')
     ON DUPLICATE KEY UPDATE execution_count = execution_count + 1;
@@ -116,7 +152,8 @@ BEGIN
         END IF;
     END IF;
 
-    -- MV CREATION & LOOKUP
+    -- MV CREATION CONDITION
+    -- query repeats >= 5 times, is aggregate, total MV count < 5
     IF v_is_aggregate AND exec_count >= 5 THEN
         SELECT mv_name, is_stale INTO v_mv_name, v_stale FROM mv_metadata WHERE query_fingerprint = @fingerprint LIMIT 1;
         
@@ -125,7 +162,6 @@ BEGIN
             IF mv_count < 5 THEN
                 SET v_mv_name = CONCAT('mv_', SUBSTRING(@fingerprint, 1, 8));
                 
-                -- Spawn Dynamic View
                 SET @create_mv_sql = CONCAT('CREATE TABLE ', v_mv_name, ' AS ', q);
                 PREPARE stmt_mv FROM @create_mv_sql;
                 EXECUTE stmt_mv;
@@ -140,52 +176,49 @@ BEGIN
     END IF;
 
     -- CBO COMPUTATIONS
-    SET cost_full = v_total_rows * 1.0;
-    SET cost_index = v_total_rows * v_selectivity * 0.2;
+    SET cost_full = v_total_rows * mult_full;
+    SET cost_index = v_total_rows * v_selectivity * mult_idx;
     
     IF v_is_aggregate THEN
-        SET cost_agg = v_total_rows * 0.3;
+        SET cost_agg = v_total_rows * mult_agg;
     END IF;
 
     IF v_mv_name IS NOT NULL THEN
-        -- Get MV Rows dynamically
         SET @stmt_cnt = CONCAT('SELECT COUNT(*) INTO @mvr FROM ', v_mv_name);
         PREPARE stmt_cnt FROM @stmt_cnt; 
         EXECUTE stmt_cnt; 
         DEALLOCATE PREPARE stmt_cnt;
         SET v_mv_rows = IFNULL(@mvr, 1);
-        SET cost_mv = v_mv_rows * 0.05;
+        
+        -- MV USAGE CONDITION
+        IF v_mv_rows < (v_total_rows * 0.7) THEN
+            SET cost_mv = v_mv_rows * mult_mv;
+        ELSE
+            SET cost_mv = 9999999;
+        END IF;
     END IF;
 
-    -- COMPARE & ROUTE
+    -- EXPLICIT COMPETITION LOOP
     SET chosen_cost = cost_full;
     SET final_plan = 'FULL_SCAN';
-    SET v_explanation = CONCAT('FULL_SCAN selected. Base Cost: ', cost_full);
+    SET v_explanation = 'FULL_SCAN selected due to lack of useful index and high cardinality';
 
     IF v_has_filter AND cost_index < chosen_cost THEN
         SET chosen_cost = cost_index;
         SET final_plan = 'INDEX_SCAN';
-        SET v_explanation = CONCAT('INDEX_SCAN selected due to high selectivity filter. Cost: ', cost_index);
+        SET v_explanation = 'INDEX_SCAN selected due to high selectivity and lower estimated cost than FULL_SCAN';
     END IF;
 
     IF v_is_aggregate AND cost_agg < chosen_cost THEN
         SET chosen_cost = cost_agg;
         SET final_plan = 'AGGREGATE_PUSHDOWN';
-        SET v_explanation = CONCAT('AGGREGATE_PUSHDOWN selected for GROUP BY topology. Cost: ', cost_agg);
+        SET v_explanation = 'AGGREGATE_PUSHDOWN selected. GROUP BY operations explicitly cheaper calculated at the engine layer.';
     END IF;
 
     IF v_mv_name IS NOT NULL AND cost_mv < chosen_cost THEN
         SET chosen_cost = cost_mv;
         SET final_plan = 'USE_MV';
-        SET v_explanation = CONCAT('USE_MV selected! Repetitive aggregate pattern matched to materialized cache. Cost: ', cost_mv);
-    END IF;
-
-    -- Index Recommendation Engine (Background Task)
-    IF exec_count > 10 AND chosen_cost > 3000 THEN
-        IF v_has_filter THEN
-            INSERT IGNORE INTO index_recommendations (query_fingerprint, recommendation)
-            VALUES (@fingerprint, CONCAT('CREATE INDEX idx_auto_', SUBSTRING(@fingerprint,1,6), ' ON order_fact(product_id) -- (Driven by CBO high cost threshold)'));
-        END IF;
+        SET v_explanation = 'USE_MV selected due to precomputed aggregation and lower scan cost';
     END IF;
 
     -- EXECUTE PLAN
@@ -193,16 +226,20 @@ BEGIN
     
     IF final_plan = 'USE_MV' THEN
         IF v_stale THEN
-            -- Synchronous refresh of stale MV
-            SET @trunc = CONCAT('TRUNCATE TABLE ', v_mv_name);
-            PREPARE stmt_trunc FROM @trunc; EXECUTE stmt_trunc; DEALLOCATE PREPARE stmt_trunc;
+            -- Safe Temp Swap Strategy
+            SET @tmp_tbl = CONCAT(v_mv_name, '_tmp');
+            SET @create_tmp = CONCAT('CREATE TABLE ', @tmp_tbl, ' AS ', q);
+            PREPARE stmt_tmp FROM @create_tmp; EXECUTE stmt_tmp; DEALLOCATE PREPARE stmt_tmp;
             
-            SET @ref = CONCAT('INSERT INTO ', v_mv_name, ' ', q);
-            PREPARE stmt_ref FROM @ref; EXECUTE stmt_ref; DEALLOCATE PREPARE stmt_ref;
+            SET @swap = CONCAT('RENAME TABLE ', v_mv_name, ' TO ', v_mv_name, '_old, ', @tmp_tbl, ' TO ', v_mv_name);
+            PREPARE stmt_swap FROM @swap; EXECUTE stmt_swap; DEALLOCATE PREPARE stmt_swap;
+            
+            SET @drop_old = CONCAT('DROP TABLE IF EXISTS ', v_mv_name, '_old');
+            PREPARE stmt_drop FROM @drop_old; EXECUTE stmt_drop; DEALLOCATE PREPARE stmt_drop;
             
             UPDATE mv_metadata SET is_stale = FALSE WHERE mv_name = v_mv_name;
         END IF;
-        
+
         UPDATE mv_metadata SET usage_count = usage_count + 1, last_updated = NOW() WHERE mv_name = v_mv_name;
         
         SET @sql = CONCAT('SELECT * FROM ', v_mv_name);
@@ -213,20 +250,74 @@ BEGIN
     END IF;
     
     SET end_t = UNIX_TIMESTAMP(NOW(6));
+    SET run_time = end_t - start_t;
+
+    -- ===========================================
+    -- ADAPTIVE COST MODEL UPDATING (MANDATORY BOUNDS)
+    -- ===========================================
+    SELECT avg_execution_time INTO v_old_avg FROM plan_cost_model WHERE plan_name = final_plan LIMIT 1;
+    SET v_new_avg = v_old_avg * 0.8 + run_time * 0.2;
+    
+    -- We assume the base multiplier drifts proportional to its timing shift
+    IF NULLIF(v_old_avg, 0) IS NOT NULL THEN
+        SET v_new_mult = (v_new_avg / v_old_avg) * (
+            CASE 
+                WHEN final_plan = 'FULL_SCAN' THEN mult_full
+                WHEN final_plan = 'INDEX_SCAN' THEN mult_idx
+                WHEN final_plan = 'USE_MV' THEN mult_mv
+                ELSE mult_agg
+            END
+        );
+    ELSE
+        SET v_new_mult = CASE 
+            WHEN final_plan = 'FULL_SCAN' THEN mult_full
+            WHEN final_plan = 'INDEX_SCAN' THEN mult_idx
+            WHEN final_plan = 'USE_MV' THEN mult_mv
+            ELSE mult_agg
+        END;
+    END IF;
+
+    -- CLAMP BOUNDARIES
+    IF final_plan = 'FULL_SCAN' THEN
+        SET v_new_mult = GREATEST(0.5, LEAST(2.0, v_new_mult));
+    ELSEIF final_plan = 'INDEX_SCAN' THEN
+        SET v_new_mult = GREATEST(0.05, LEAST(1.5, v_new_mult));
+    ELSEIF final_plan = 'USE_MV' THEN
+        SET v_new_mult = GREATEST(0.01, LEAST(0.5, v_new_mult));
+    ELSEIF final_plan = 'AGGREGATE_PUSHDOWN' THEN
+        SET v_new_mult = GREATEST(0.1, LEAST(1.2, v_new_mult));
+    END IF;
+
+    UPDATE plan_cost_model 
+    SET avg_execution_time = v_new_avg, multiplier = v_new_mult 
+    WHERE plan_name = final_plan;
+
+    IF v_qid % 100 = 0 THEN
+        UPDATE plan_cost_model SET multiplier = multiplier * 0.9 + 1.0 * 0.1 WHERE plan_name = 'FULL_SCAN';
+        UPDATE plan_cost_model SET multiplier = multiplier * 0.9 + 0.2 * 0.1 WHERE plan_name = 'INDEX_SCAN';
+        UPDATE plan_cost_model SET multiplier = multiplier * 0.9 + 0.05 * 0.1 WHERE plan_name = 'USE_MV';
+        UPDATE plan_cost_model SET multiplier = multiplier * 0.9 + 0.3 * 0.1 WHERE plan_name = 'AGGREGATE_PUSHDOWN';
+    END IF;
 
     -- LOGGING
-    INSERT INTO query_log (query_id, estimated_cost, actual_execution_time, chosen_plan, used_index, used_mv, query_type, explanation)
+    INSERT INTO query_log (query_id, estimated_cost, actual_execution_time, chosen_plan, used_index, used_mv, query_type, explanation, explain_rows, explain_key, explain_type, error_msg)
     VALUES (
         v_qid, 
         chosen_cost, 
-        end_t - start_t, 
+        run_time, 
         final_plan, 
         CASE WHEN final_plan = 'INDEX_SCAN' THEN TRUE ELSE FALSE END,
         CASE WHEN final_plan = 'USE_MV' THEN TRUE ELSE FALSE END,
         qtype,
-        v_explanation
+        v_explanation,
+        exp_rows,
+        exp_key,
+        exp_type,
+        ''
     );
 
-    UPDATE workload_stats SET avg_time = (avg_time + (end_t - start_t))/2, avg_cost = (avg_cost + chosen_cost)/2, last_plan = final_plan WHERE fingerprint = @fingerprint;
+    UPDATE workload_stats SET avg_time = (avg_time + run_time)/2, avg_cost = (avg_cost + chosen_cost)/2, last_plan = final_plan WHERE fingerprint = @fingerprint;
+    
+    COMMIT;
 END$$
 DELIMITER ;

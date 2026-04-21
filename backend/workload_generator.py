@@ -38,14 +38,14 @@ def setup_database():
     cursor.execute("CREATE DATABASE autodb_ecommerce;")
     cursor.execute("USE autodb_ecommerce;")
     
+    import os
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    
     print("Building schema from sql/setup.sql...")
-    with open('sql/setup.sql', 'r') as f:
-        setup_sql = f.read()
-        for result in cursor.execute(setup_sql, multi=True):
-            pass
+    execute_sql_file(cursor, os.path.join(base_dir, 'sql', 'setup.sql'))
             
     print("Building procedures from sql/procedures.sql...")
-    with open('sql/procedures.sql', 'r') as f:
+    with open(os.path.join(base_dir, 'sql', 'procedures.sql'), 'r') as f:
         procs_sql = f.read()
         # manually executing procedures since multi=True is weird with DELIMITER
         stmts = procs_sql.replace('DELIMITER $$', '').replace('DELIMITER ;', '').split('$$')
@@ -116,8 +116,23 @@ def generate_workload(conn, cursor):
             cursor.execute("CALL normal_execute(%s)", (q,))
             while cursor.nextset(): pass
             
+            dict_cursor = conn.cursor(dictionary=True)
+            exp_rows = 0
+            exp_key = 'NONE'
+            exp_type = 'ALL'
+            try:
+                dict_cursor.execute(f"EXPLAIN {q}")
+                exp_res = dict_cursor.fetchall()
+                if exp_res:
+                    exp_rows = exp_res[0].get('rows') or 0
+                    exp_key = str(exp_res[0].get('key') or 'NONE')
+                    exp_type = str(exp_res[0].get('type') or 'ALL')
+                while dict_cursor.nextset(): pass
+            except: pass
+            finally: dict_cursor.close()
+            
             # Then run optimizer execution
-            cursor.execute("CALL optimized_execute(%s)", (q,))
+            cursor.execute("CALL optimized_execute(%s, %s, %s, %s)", (q, int(exp_rows), exp_key, exp_type))
             while cursor.nextset(): pass
             
         except Exception as e:

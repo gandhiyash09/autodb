@@ -57,6 +57,10 @@ CREATE TABLE query_log (
     used_mv BOOLEAN DEFAULT FALSE,
     query_type VARCHAR(50),
     explanation TEXT,
+    explain_rows INT,
+    explain_key VARCHAR(50),
+    explain_type VARCHAR(50),
+    error_msg TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_query FOREIGN KEY (query_id) REFERENCES query_master(query_id)
 );
@@ -103,6 +107,18 @@ CREATE TABLE index_recommendations (
     recommendation TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE plan_cost_model (
+    plan_name VARCHAR(50) PRIMARY KEY,
+    avg_execution_time DOUBLE DEFAULT 0.0,
+    multiplier DOUBLE DEFAULT 1.0
+);
+
+INSERT INTO plan_cost_model (plan_name, multiplier) VALUES
+('FULL_SCAN', 1.0),
+('INDEX_SCAN', 0.2),
+('USE_MV', 0.05),
+('AGGREGATE_PUSHDOWN', 0.3);
 
 -- ==========================================
 -- TRIGGERS FOR STALENESS
