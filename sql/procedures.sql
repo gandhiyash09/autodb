@@ -57,6 +57,9 @@ BEGIN
     DECLARE v_new_avg DOUBLE;
     DECLARE v_new_mult DOUBLE;
     DECLARE v_error_msg TEXT DEFAULT NULL;
+    DECLARE baseline_start DOUBLE;
+    DECLARE baseline_time DOUBLE DEFAULT 0.0;
+    DECLARE improvement_percent DOUBLE DEFAULT 0.0;
     
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
@@ -71,6 +74,12 @@ BEGIN
     END;
 
     START TRANSACTION;
+
+    -- STEP A: Measure Baseline Execution
+    SET baseline_start = UNIX_TIMESTAMP(NOW(6));
+    SET @bsql = q;
+    PREPARE bstmt FROM @bsql; EXECUTE bstmt; DEALLOCATE PREPARE bstmt;
+    SET baseline_time = UNIX_TIMESTAMP(NOW(6)) - baseline_start;
 
     -- Fallback EXPLAIN rules if Python pushes null equivalent
     IF exp_rows <= 0 THEN SET exp_rows = v_total_rows; END IF;
@@ -277,7 +286,15 @@ BEGIN
     END IF;
 
     -- LOGGING
-    INSERT INTO query_log (query_text, plan_choice, execution_time, cost, explain_rows, explain_key, explain_type, error_msg)
+    IF baseline_time > 0 THEN
+        SET improvement_percent = ((baseline_time - run_time) / baseline_time) * 100;
+    ELSE
+        SET improvement_percent = 0;
+    END IF;
+
+    INSERT INTO query_log (
+        query_text, plan_choice, execution_time, cost, explain_rows, explain_key, explain_type, error_msg, baseline_time, improvement_percent
+    )
     VALUES (
         q, 
         IFNULL(final_plan, 'FULL_SCAN'), 
@@ -286,7 +303,9 @@ BEGIN
         exp_rows,
         exp_key,
         exp_type,
-        v_explanation
+        v_explanation,
+        baseline_time,
+        improvement_percent
     );
 
     UPDATE workload_stats SET avg_time = (avg_time + run_time)/2, avg_cost = (avg_cost + chosen_cost)/2, last_plan = final_plan WHERE fingerprint = @fingerprint;

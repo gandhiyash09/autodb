@@ -186,7 +186,6 @@ with tab2:
         full_query_log = pd.read_sql("SELECT * FROM query_log ORDER BY created_at ASC", conn)
         workload = pd.read_sql("SELECT * FROM workload_stats", conn)
         mv_meta = pd.read_sql("SELECT * FROM mv_metadata", conn)
-        improvement = parse_improvements(full_query_log)
         
         st.subheader("System Analytics KPIs")
         if not full_query_log.empty:
@@ -199,7 +198,12 @@ with tab2:
         k1, k2, k3, k4 = st.columns(4)
         with k1: st.metric("Total User + Training Queries", total_queries)
         with k2: st.metric("Active Materialized Views", mv_count)
-        with k3: st.metric("Avg Performance Improvement", f"{improvement:.1f}%")
+        with k3: 
+            if 'improvement_percent' in full_query_log.columns and not full_query_log['improvement_percent'].isnull().all():
+                avg_improvement = full_query_log['improvement_percent'].mean()
+            else:
+                avg_improvement = 0.0
+            st.metric("Average Improvement (%)", f"{avg_improvement:.2f}%")
         with k4: st.metric("Total Logged Executions", total_queries)
         
         st.markdown("---")
@@ -241,9 +245,26 @@ with tab2:
             fig.update_layout(yaxis_title="Execution Time (s)", xaxis_title="Sequential Run Number")
             st.plotly_chart(fig, use_container_width=True)
             
+            fig_comp = px.line(full_query_log, 
+                               x='run_number', 
+                               y=['baseline_time', 'execution_time'],
+                               markers=True, 
+                               title="Baseline vs Optimized Execution Time")
+            
+            fig_comp.update_layout(yaxis_title="Time (s)", xaxis_title="Run Number")
+            st.plotly_chart(fig_comp, use_container_width=True)
+            
+            if 'baseline_time' in full_query_log.columns:
+                full_query_log['baseline_time'] = full_query_log['baseline_time'].round(4)
+                full_query_log['improvement_percent'] = full_query_log['improvement_percent'].round(2)
+            full_query_log['execution_time'] = full_query_log['execution_time'].round(4)
             full_query_log['cost'] = full_query_log['cost'].round(2)
             st.subheader("Query Execution Logs")
-            st.dataframe(full_query_log[['plan_choice', 'execution_time', 'cost', 'error_msg']])
+            
+            try:
+                st.dataframe(full_query_log[['plan_choice', 'baseline_time', 'execution_time', 'improvement_percent', 'cost', 'error_msg']])
+            except KeyError:
+                st.dataframe(full_query_log[['plan_choice', 'execution_time', 'cost', 'error_msg']])
         
 
             

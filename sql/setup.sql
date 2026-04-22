@@ -51,6 +51,8 @@ CREATE TABLE query_log (
   explain_key VARCHAR(50),
   explain_type VARCHAR(50),
   error_msg TEXT,
+  baseline_time DOUBLE,
+  improvement_percent DOUBLE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
