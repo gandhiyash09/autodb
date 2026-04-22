@@ -112,10 +112,7 @@ def generate_workload(conn, cursor):
             q = t
             
         try:
-            # First fetch the baseline time
-            cursor.execute("CALL normal_execute(%s)", (q,))
-            while cursor.nextset(): pass
-            
+
             dict_cursor = conn.cursor(dictionary=True)
             exp_rows = 0
             exp_key = 'NONE'

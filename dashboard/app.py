@@ -126,7 +126,7 @@ def display_results(metrics, is_custom=False):
         with col1: st.metric("Plan Chosen", metrics.get('plan_choice', 'N/A'))
         with col2: st.metric("Execution Time", f"{metrics.get('execution_time', 0.0):.4f}s")
         with col3: st.metric("Estimated Cost", f"{metrics.get('estimated_cost', 0.0):.1f}")
-        st.info(f"**AI Engine Explanation:** {metrics.get('explanation', 'None')}")
+        st.info(f"**Optimizer Decision Explanation:** {metrics.get('explanation', 'None')}")
 
 with tab1:
     st.header("AutoDB Terminal")
@@ -176,13 +176,16 @@ with tab1:
 
 with tab2:
     st.header("Optimizer Analytics & Dashboards")
-    st.caption("Visualizing performance scaling, View creation schemas, and AI CBO index suggestions.")
+    st.caption("Visualizing performance scaling, View creation schemas, and Optimizer CBO logic.")
 
     col_info, col_btn = st.columns([0.8, 0.2])
     with col_info: st.info("Realtime trace monitor pulling directly from metadata engines.")
     
     try:
-        full_query_log, workload, mv_meta, idx_cands = fetch_workload_kpis()
+        conn = get_connection()
+        full_query_log = pd.read_sql("SELECT * FROM query_log ORDER BY created_at ASC", conn)
+        workload = pd.read_sql("SELECT * FROM workload_stats", conn)
+        mv_meta = pd.read_sql("SELECT * FROM mv_metadata", conn)
         improvement = parse_improvements(full_query_log)
         
         st.subheader("System Analytics KPIs")
@@ -211,17 +214,6 @@ with tab2:
             else: st.info("No plan data available yet. Please run backend/workload_generator.py to initialize.")
             
         st.markdown("---")
-
-        st.subheader("Top 5 Slow Queries")
-        try:
-            sc = get_connection()
-            slow_q = pd.read_sql("SELECT query_text, execution_time, plan_choice FROM query_log ORDER BY execution_time DESC LIMIT 5", sc)
-            if not slow_q.empty:
-                st.dataframe(slow_q, use_container_width=True)
-            sc.close()
-        except: pass
-        
-        st.markdown("---")
         
         st.subheader("Why Plan Changed (Insights)")
         if not full_query_log.empty and "plan_choice" in full_query_log.columns:
@@ -236,28 +228,27 @@ with tab2:
                     st.success(c)
             else:
                 st.info("No queries found yet.")
-        
-        st.subheader("Plan Evolution Over Time")
-        if not full_query_log.empty and "plan_choice" in full_query_log.columns:
-            full_query_log['run_index'] = full_query_log.reset_index().index
-            fig_evo = px.scatter(full_query_log, x='run_index', y='execution_time', color='plan_choice', title="Execution Timing & Plan Shift Progression")
-            st.plotly_chart(fig_evo, use_container_width=True)
+
+            full_query_log['run_number'] = full_query_log.reset_index().index + 1
+            
+            fig = px.line(full_query_log, 
+                          x='run_number', 
+                          y='execution_time', 
+                          symbol='plan_choice',
+                          markers=True, 
+                          title="Execution Time Evolution Across Queries")
+            
+            fig.update_layout(yaxis_title="Execution Time (s)", xaxis_title="Sequential Run Number")
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.subheader("Query Execution Logs")
+            st.dataframe(full_query_log[['id', 'plan_choice', 'execution_time', 'cost', 'error_msg']])
         
         st.markdown("---")
-        
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader("Materialized Views Engine")
-            st.dataframe(mv_meta, use_container_width=True)
-        with c2:
-            st.subheader("Index Recommendation Generator")
-            st.dataframe(idx_cands, use_container_width=True)
-        
-        st.markdown("---")
-        st.subheader("Comprehensive Query AI Logs")
+        st.subheader("Query Execution Logs")
         if not full_query_log.empty and "plan_choice" in full_query_log.columns:
             view_logs = full_query_log[['execution_time', 'plan_choice', 'cost']]
             st.dataframe(view_logs, use_container_width=True)
             
     except Exception as e:
-        st.error(f"Failed pulling AI metrics. Please boot backend/workload_generator.py explicitly. Trace: {e}")
+        st.error(f"Failed pulling Optimizer metrics. Please boot backend/workload_generator.py explicitly. Trace: {e}")

@@ -54,15 +54,7 @@ CREATE TABLE query_log (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE query_feedback (
-    query_id INT,
-    plan_choice VARCHAR(50),
-    query_type VARCHAR(50),
-    avg_execution_time DOUBLE,
-    avg_cost DOUBLE,
-    executions INT,
-    PRIMARY KEY (query_id, plan_choice)
-);
+
 
 CREATE TABLE mv_metadata (
     mv_name VARCHAR(50) PRIMARY KEY,
@@ -90,12 +82,7 @@ CREATE TABLE column_stats (
     PRIMARY KEY (table_name, column_name)
 );
 
-CREATE TABLE index_recommendations (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    query_fingerprint VARCHAR(64),
-    recommendation TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+
 
 CREATE TABLE plan_cost_model (
     plan_name VARCHAR(50) PRIMARY KEY,

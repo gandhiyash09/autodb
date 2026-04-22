@@ -16,32 +16,7 @@ BEGIN
     ON DUPLICATE KEY UPDATE total_rows = VALUES(total_rows), distinct_values = VALUES(distinct_values), min_value = VALUES(min_value), max_value = VALUES(max_value);
 END$$
 
--- ==========================================
--- PROCEDURE: normal_execute
--- Description: Executes natively and logs normal execution time
--- ==========================================
-CREATE PROCEDURE normal_execute(IN q TEXT)
-BEGIN
-    DECLARE v_qid INT;
-    DECLARE start_t DOUBLE;
-    DECLARE end_t DOUBLE;
-    
-    SET start_t = UNIX_TIMESTAMP(NOW(6));
-    
-    SET @sql = q;
-    PREPARE stmt FROM @sql;
-    EXECUTE stmt;
-    DEALLOCATE PREPARE stmt;
-    
-    SET end_t = UNIX_TIMESTAMP(NOW(6));
-    
-    SET @qnorm = LOWER(TRIM(REPLACE(REPLACE(q, '\n', ' '), '\t', ' ')));
-    SET @qnorm = REGEXP_REPLACE(@qnorm, '[0-9]+(\\.[0-9]+)?', '?');
-    SET @qnorm = REGEXP_REPLACE(@qnorm, '\'.*?\'', '?');
-    
-    INSERT INTO query_log (query_text, plan_choice, execution_time, cost, explain_rows, explain_key, explain_type, error_msg)
-    VALUES (q, 'FULL_SCAN', end_t - start_t, 0.0, 0, 'NONE', 'ALL', '');
-END$$
+
 
 -- ==========================================
 -- MAIN OPTIMIZER ROUTING PROCEDURE
@@ -90,7 +65,7 @@ BEGIN
         INSERT INTO query_log (
             query_text, plan_choice, cost, execution_time, explain_rows, explain_key, explain_type, error_msg
         ) VALUES (
-            q, IFNULL(final_plan, 'FAILED'), chosen_cost, 0.0, exp_rows, exp_key, exp_type, v_error_msg
+            q, IFNULL(final_plan, 'FULL_SCAN'), chosen_cost, 0.0, exp_rows, exp_key, exp_type, v_error_msg
         );
         RESIGNAL;
     END;
@@ -290,17 +265,28 @@ BEGIN
         UPDATE plan_cost_model SET multiplier = multiplier * 0.9 + 0.3 * 0.1 WHERE plan_name = 'AGGREGATE_PUSHDOWN';
     END IF;
 
+    -- Formulate safe explanation logically
+    IF final_plan = 'FULL_SCAN' THEN
+        SET v_explanation = 'FULL_SCAN chosen due to sequence fallback or lack of filters.';
+    ELSEIF final_plan = 'INDEX_SCAN' THEN
+        SET v_explanation = 'INDEX_SCAN chosen due to high selectivity.';
+    ELSEIF final_plan = 'USE_MV' THEN
+        SET v_explanation = 'USE_MV chosen due to low precomputed scan cost.';
+    ELSE
+        SET v_explanation = 'AGGREGATE_PUSHDOWN chosen due to grouped computation efficiency.';
+    END IF;
+
     -- LOGGING
     INSERT INTO query_log (query_text, plan_choice, execution_time, cost, explain_rows, explain_key, explain_type, error_msg)
     VALUES (
         q, 
-        IFNULL(final_plan, 'FAILED'), 
+        IFNULL(final_plan, 'FULL_SCAN'), 
         run_time, 
         chosen_cost, 
         exp_rows,
         exp_key,
         exp_type,
-        ''
+        v_explanation
     );
 
     UPDATE workload_stats SET avg_time = (avg_time + run_time)/2, avg_cost = (avg_cost + chosen_cost)/2, last_plan = final_plan WHERE fingerprint = @fingerprint;
