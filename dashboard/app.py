@@ -235,6 +235,12 @@ with tab2:
 
             full_query_log['run_number'] = full_query_log.reset_index().index + 1
             
+            if 'baseline_time' in full_query_log.columns:
+                full_query_log['baseline_time'] = full_query_log['baseline_time'].round(4)
+                full_query_log['improvement_percent'] = full_query_log['improvement_percent'].round(2)
+            full_query_log['execution_time'] = full_query_log['execution_time'].round(4)
+            full_query_log['cost'] = full_query_log['cost'].round(2)
+            
             fig = px.line(full_query_log, 
                           x='run_number', 
                           y='execution_time', 
@@ -254,11 +260,7 @@ with tab2:
             fig_comp.update_layout(yaxis_title="Time (s)", xaxis_title="Run Number")
             st.plotly_chart(fig_comp, use_container_width=True)
             
-            if 'baseline_time' in full_query_log.columns:
-                full_query_log['baseline_time'] = full_query_log['baseline_time'].round(4)
-                full_query_log['improvement_percent'] = full_query_log['improvement_percent'].round(2)
-            full_query_log['execution_time'] = full_query_log['execution_time'].round(4)
-            full_query_log['cost'] = full_query_log['cost'].round(2)
+
             st.subheader("Query Execution Logs")
             
             try:

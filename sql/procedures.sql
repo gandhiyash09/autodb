@@ -57,7 +57,7 @@ BEGIN
     DECLARE v_new_avg DOUBLE;
     DECLARE v_new_mult DOUBLE;
     DECLARE v_error_msg TEXT DEFAULT NULL;
-    DECLARE baseline_start DOUBLE;
+    DECLARE baseline_start DATETIME(6);
     DECLARE baseline_time DOUBLE DEFAULT 0.0;
     DECLARE improvement_percent DOUBLE DEFAULT 0.0;
     
@@ -76,10 +76,11 @@ BEGIN
     START TRANSACTION;
 
     -- STEP A: Measure Baseline Execution
-    SET baseline_start = UNIX_TIMESTAMP(NOW(6));
+    -- Baseline execution for timing only (result ignored)
+    SET baseline_start = NOW(6);
     SET @bsql = q;
     PREPARE bstmt FROM @bsql; EXECUTE bstmt; DEALLOCATE PREPARE bstmt;
-    SET baseline_time = UNIX_TIMESTAMP(NOW(6)) - baseline_start;
+    SET baseline_time = TIMESTAMPDIFF(MICROSECOND, baseline_start, NOW(6)) / 1000000;
 
     -- Fallback EXPLAIN rules if Python pushes null equivalent
     IF exp_rows <= 0 THEN SET exp_rows = v_total_rows; END IF;
