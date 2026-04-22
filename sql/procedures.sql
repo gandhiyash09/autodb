@@ -267,13 +267,13 @@ BEGIN
 
     -- Formulate safe explanation logically
     IF final_plan = 'FULL_SCAN' THEN
-        SET v_explanation = 'FULL_SCAN chosen due to sequence fallback or lack of filters.';
+        SET v_explanation = 'FULL_SCAN chosen due to no usable index';
     ELSEIF final_plan = 'INDEX_SCAN' THEN
-        SET v_explanation = 'INDEX_SCAN chosen due to high selectivity.';
+        SET v_explanation = 'INDEX_SCAN chosen due to high selectivity';
     ELSEIF final_plan = 'USE_MV' THEN
-        SET v_explanation = 'USE_MV chosen due to low precomputed scan cost.';
+        SET v_explanation = 'USE_MV chosen due to cached aggregation';
     ELSE
-        SET v_explanation = 'AGGREGATE_PUSHDOWN chosen due to grouped computation efficiency.';
+        SET v_explanation = 'AGGREGATE_PUSHDOWN chosen for grouped execution efficiency';
     END IF;
 
     -- LOGGING

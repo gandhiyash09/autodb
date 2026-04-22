@@ -200,7 +200,7 @@ with tab2:
         with k1: st.metric("Total User + Training Queries", total_queries)
         with k2: st.metric("Active Materialized Views", mv_count)
         with k3: st.metric("Avg Performance Improvement", f"{improvement:.1f}%")
-        with k4: st.metric("Secured Error Events Pipeline", err_count)
+        with k4: st.metric("Total Logged Executions", total_queries)
         
         st.markdown("---")
         
@@ -241,14 +241,11 @@ with tab2:
             fig.update_layout(yaxis_title="Execution Time (s)", xaxis_title="Sequential Run Number")
             st.plotly_chart(fig, use_container_width=True)
             
+            full_query_log['cost'] = full_query_log['cost'].round(2)
             st.subheader("Query Execution Logs")
-            st.dataframe(full_query_log[['id', 'plan_choice', 'execution_time', 'cost', 'error_msg']])
+            st.dataframe(full_query_log[['plan_choice', 'execution_time', 'cost', 'error_msg']])
         
-        st.markdown("---")
-        st.subheader("Query Execution Logs")
-        if not full_query_log.empty and "plan_choice" in full_query_log.columns:
-            view_logs = full_query_log[['execution_time', 'plan_choice', 'cost']]
-            st.dataframe(view_logs, use_container_width=True)
+
             
     except Exception as e:
         st.error(f"Failed pulling Optimizer metrics. Please boot backend/workload_generator.py explicitly. Trace: {e}")
