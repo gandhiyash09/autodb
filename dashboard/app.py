@@ -186,6 +186,10 @@ with tab2:
         full_query_log = pd.read_sql("SELECT * FROM query_log ORDER BY created_at ASC", conn)
         workload = pd.read_sql("SELECT * FROM workload_stats", conn)
         mv_meta = pd.read_sql("SELECT * FROM mv_metadata", conn)
+        try:
+            idx_meta = pd.read_sql("SELECT * FROM index_metadata", conn)
+        except Exception:
+            idx_meta = pd.DataFrame()
         
         st.subheader("System Analytics KPIs")
         if not full_query_log.empty:
@@ -260,7 +264,23 @@ with tab2:
             fig_comp.update_layout(yaxis_title="Time (s)", xaxis_title="Run Number")
             st.plotly_chart(fig_comp, use_container_width=True)
             
+            st.markdown("---")
+            st.subheader("Auto-Tuning Metadata")
+            metacol1, metacol2 = st.columns(2)
+            with metacol1:
+                st.write("**Materialized Views (Auto-Created)**")
+                if len(mv_meta) > 0:
+                    st.dataframe(mv_meta, use_container_width=True)
+                else:
+                    st.info("No dynamically created Materialized Views yet.")
+            with metacol2:
+                st.write("**Indexes (Auto-Created)**")
+                if len(idx_meta) > 0:
+                    st.dataframe(idx_meta, use_container_width=True)
+                else:
+                    st.info("No dynamically created Indexes yet.")
 
+            st.markdown("---")
             st.subheader("Query Execution Logs")
             
             try:

@@ -152,6 +152,42 @@ BEGIN
         END IF;
     END IF;
 
+    -- AUTO INDEX CREATION CONDITION
+    -- query repeats >= 5 times, is a filter on our star schema, and no index currently serves it
+    IF v_has_filter AND exec_count >= 5 AND exp_key = 'NONE' THEN
+        -- extract the column ONLY for exact equality filters (safest demo path)
+        SET @col_name = NULL;
+        
+        -- allow optional spaces around '=' and tolerate multiple spaces after WHERE
+        IF @qnorm LIKE '%where%product_id=%' OR @qnorm LIKE '%where%product_id =%' THEN
+            SET @col_name = 'product_id';
+        ELSEIF @qnorm LIKE '%where%warehouse_id=%' OR @qnorm LIKE '%where%warehouse_id =%' THEN
+            SET @col_name = 'warehouse_id';
+        ELSEIF @qnorm LIKE '%where%date_id=%' OR @qnorm LIKE '%where%date_id =%' THEN
+            SET @col_name = 'date_id';
+        END IF;
+
+        IF @col_name IS NOT NULL THEN
+            SELECT COUNT(*) INTO @existing_idx 
+            FROM index_metadata 
+            WHERE table_name = 'order_fact' AND column_name = @col_name;
+            
+            IF @existing_idx = 0 THEN
+                SELECT COUNT(*) INTO @idx_count FROM index_metadata;
+                IF @idx_count < 3 THEN
+                    SET @idx_name = CONCAT('idx_', @col_name);
+                    SET @create_idx_sql = CONCAT('CREATE INDEX ', @idx_name, ' ON order_fact(', @col_name, ')');
+                    PREPARE stmt_idx FROM @create_idx_sql;
+                    EXECUTE stmt_idx;
+                    DEALLOCATE PREPARE stmt_idx;
+                    
+                    INSERT INTO index_metadata (index_name, table_name, column_name, usage_count)
+                    VALUES (@idx_name, 'order_fact', @col_name, 0);
+                END IF;
+            END IF;
+        END IF;
+    END IF;
+
     -- CBO COMPUTATIONS
     SET cost_full = v_total_rows * mult_full;
     SET cost_index = v_total_rows * v_selectivity * mult_idx;
@@ -221,6 +257,10 @@ BEGIN
         SET @sql = CONCAT('SELECT * FROM ', v_mv_name);
         PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
     ELSE
+        IF final_plan = 'INDEX_SCAN' AND exp_key != 'NONE' THEN
+            UPDATE index_metadata SET usage_count = usage_count + 1 WHERE index_name = exp_key;
+        END IF;
+
         SET @sql = q;
         PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
     END IF;

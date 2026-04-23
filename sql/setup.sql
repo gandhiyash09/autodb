@@ -66,6 +66,14 @@ CREATE TABLE mv_metadata (
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
+CREATE TABLE index_metadata (
+    index_name VARCHAR(50) PRIMARY KEY,
+    table_name VARCHAR(50),
+    column_name VARCHAR(50),
+    usage_count INT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE workload_stats (
     fingerprint VARCHAR(64) PRIMARY KEY,
     execution_count INT DEFAULT 0,
