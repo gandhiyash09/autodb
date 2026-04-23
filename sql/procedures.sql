@@ -95,6 +95,7 @@ BEGIN
     SET @qnorm = LOWER(TRIM(REPLACE(REPLACE(q, '\n', ' '), '\t', ' ')));
     SET @qnorm = REGEXP_REPLACE(@qnorm, '[0-9]+(\\.[0-9]+)?', '?');
     SET @qnorm = REGEXP_REPLACE(@qnorm, '\'.*?\'', '?');
+    SET @qnorm = LEFT(@qnorm, 512);
     
     -- Workload stats
     INSERT INTO workload_stats (query_pattern, execution_count, avg_time, avg_cost, last_plan)

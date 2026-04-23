@@ -63,7 +63,8 @@ CREATE TABLE mv_metadata (
     query_pattern VARCHAR(512) UNIQUE,
     usage_count INT DEFAULT 0,
     is_stale BOOLEAN DEFAULT FALSE,
-    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_mv_pattern (query_pattern)
 );
 
 CREATE TABLE index_metadata (
