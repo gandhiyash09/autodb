@@ -116,14 +116,14 @@ def run_query(query_str):
             cols = list(result.column_names or [])
             if not cols:
                 continue
-
-            if _is_explain_result(cols):
-                result.fetchall()
+            rows = result.fetchall()
+            if not rows:
                 continue
-
-            if final_df is None:
-                rows = result.fetchall()
-                final_df = pd.DataFrame(rows, columns=cols)
+            df = pd.DataFrame(rows, columns=cols)
+            # Skip EXPLAIN outputs
+            if _is_explain_result(cols):
+                continue
+            final_df = df
 
         # Forcefully flush any hidden buffers
         while cursor.nextset():
@@ -146,7 +146,7 @@ def run_query(query_str):
         metrics_cursor = conn.cursor(dictionary=True)
         metrics_cursor.execute(
             "SELECT execution_time, plan_choice, estimated_cost "
-            "FROM query_log ORDER BY created_at DESC, query_id DESC LIMIT 1"
+            "FROM query_log ORDER BY created_at DESC LIMIT 1"
         )
         try:
             run_metrics = metrics_cursor.fetchone()
@@ -272,6 +272,8 @@ with tab2:
                 reset_cursor.execute("TRUNCATE query_feedback;")
                 reset_cursor.execute("TRUNCATE workload_stats;")
                 reset_cursor.execute("UPDATE mv_metadata SET usage_count = 0, is_stale = FALSE;")
+                reset_cursor.execute("TRUNCATE mv_dynamic;")
+                reset_cursor.execute("TRUNCATE index_metadata;")
                 reset_conn.commit()
                 st.success("Memory wiped successfully!")
                 st.rerun()
@@ -286,7 +288,7 @@ with tab2:
         conn = get_connection()
         full_query_log = pd.read_sql("SELECT * FROM query_log ORDER BY created_at ASC", conn)
         workload = pd.read_sql("SELECT * FROM workload_stats", conn)
-        feedback = pd.read_sql("SELECT * FROM query_feedback ORDER BY executions DESC", conn)
+        feedback = pd.read_sql("""SELECT query_id, plan_choice, query_type, avg_execution_time, executions FROM query_feedback ORDER BY executions DESC""", conn)
         mv_meta = pd.read_sql("SELECT * FROM mv_metadata", conn)
         idx_cands = pd.read_sql("SELECT * FROM index_candidates", conn)
         mv_cands = pd.read_sql("SELECT * FROM mv_candidates", conn)
@@ -294,7 +296,7 @@ with tab2:
         st.subheader("System Analytics KPIs")
         if not full_query_log.empty:
             total_queries = len(full_query_log)
-            mv_hits = len(full_query_log[full_query_log['plan_choice'] == 'USE_MV'])
+            mv_hits = len(full_query_log[full_query_log['used_mv'] == 1])
             hit_ratio = (mv_hits / total_queries) * 100
         else:
             total_queries = 0
@@ -338,6 +340,29 @@ with tab2:
             st.plotly_chart(plan_fig, use_container_width=True)
         else:
             st.info("No plan data available yet.")
+
+        st.subheader("Dynamic Materialized Views")
+        try:
+            mv_dynamic = pd.read_sql("SELECT * FROM mv_dynamic", conn)
+            st.dataframe(mv_dynamic, use_container_width=True)
+        except:
+            st.info("No dynamic MVs created yet.")
+
+        st.subheader("Auto-Created Indexes")
+        try:
+            idx_meta = pd.read_sql("SELECT * FROM index_metadata", conn)
+            st.dataframe(idx_meta, use_container_width=True)
+        except:
+            st.info("No adaptive indexes created yet.")
+
+        st.subheader("Optimizer Decisions (Latest)")
+        latest = pd.read_sql("""
+        SELECT plan_choice, used_mv, used_index, estimated_cost, execution_time
+        FROM query_log
+        ORDER BY created_at DESC
+        LIMIT 10
+        """, conn)
+        st.dataframe(latest, use_container_width=True)
 
         st.markdown("---")
         st.subheader("Query Feedback")

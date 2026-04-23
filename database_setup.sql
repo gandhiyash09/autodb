@@ -73,7 +73,15 @@ CREATE TABLE mv_metadata (
     mv_name VARCHAR(50) PRIMARY KEY,
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     usage_count INT DEFAULT 0,
-    is_stale BOOLEAN DEFAULT FALSE
+    is_stale BOOLEAN DEFAULT FALSE,
+    last_refresh TIMESTAMP
+);
+
+CREATE TABLE index_metadata (
+    index_name VARCHAR(50),
+    table_name VARCHAR(50),
+    column_name VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE workload_stats (
@@ -129,6 +137,11 @@ CREATE TABLE yearly_revenue_mv (
     total_revenue DECIMAL(15,2) DEFAULT 0
 );
 
+CREATE TABLE mv_dynamic (
+    mv_name VARCHAR(50),
+    query_pattern TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 -- ==========================================
 -- METADATA SEEDING
 -- ==========================================
@@ -153,6 +166,10 @@ BEGIN
     INSERT INTO product_revenue_mv (product_id, total_revenue)
     VALUES (NEW.product_id, NEW.revenue)
     ON DUPLICATE KEY UPDATE total_revenue = total_revenue + NEW.revenue;
+
+    UPDATE mv_metadata
+    SET is_stale = TRUE
+    WHERE mv_name = 'product_revenue_mv';
 END$$
 
 CREATE TRIGGER update_product_warehouse_mv
@@ -409,7 +426,11 @@ BEGIN
 
     -- STEP 5: COST MODEL
     CALL get_query_cost(q, base_cost);
-    SET idx_score = CASE WHEN qtype = 'FILTER' THEN base_cost * 0.4 WHEN qtype = 'JOIN' THEN base_cost * 0.7 ELSE base_cost END;
+    SET idx_score = CASE
+        WHEN qtype = 'FILTER' THEN base_cost * 0.6
+        WHEN qtype = 'JOIN' THEN base_cost * 0.85
+        ELSE base_cost * 0.95
+    END;
 
     -- STEP 6: LOAD WORKLOAD STATS
     SELECT executions, avg_cost INTO exec_count, avg_cost 
@@ -467,13 +488,15 @@ BEGIN
     SET @start_time = NOW(6);
     
     IF final_plan = 'USE_MV' THEN
-        UPDATE mv_metadata SET usage_count = usage_count + 1 WHERE mv_name = 'product_revenue_mv';
+        IF EXISTS (SELECT 1 FROM mv_dynamic WHERE mv_name = 'mv_auto_product') THEN
+            SELECT * FROM mv_auto_product;
+        ELSE
+           SET @sql = q;
+            PREPARE stmt FROM @sql;
+            EXECUTE stmt;
+            DEALLOCATE PREPARE stmt;
+        END IF;
     END IF;
-
-    SET @sql = q;
-    PREPARE stmt FROM @sql;
-    EXECUTE stmt;
-    DEALLOCATE PREPARE stmt;
 
     SET @end_time = NOW(6);
     SET exec_time = ROUND(TIMESTAMPDIFF(MICROSECOND, @start_time, @end_time) / 1000000.0, 6);
@@ -484,11 +507,11 @@ BEGIN
 
     -- Simulate longer scan times for large tables if FULL_SCAN
     IF final_plan = 'FULL_SCAN' THEN
-        SET exec_time = exec_time + (RAND() * 0.05 + 0.02);
-    ELSEIF final_plan = 'AGGREGATE_PUSHDOWN' THEN
-        SET exec_time = exec_time + (RAND() * 0.02);
+        SET exec_time = exec_time + 0.05;
+    ELSEIF final_plan = 'INDEX_SCAN' THEN
+        SET exec_time = exec_time * 0.7;
     ELSEIF final_plan = 'USE_MV' THEN
-        SET exec_time = exec_time * 0.1;
+        SET exec_time = exec_time * 0.3;
     END IF;
 
     -- STEP 11: LOGGING
@@ -504,10 +527,66 @@ BEGIN
         last_plan = VALUES(last_plan);
 
     -- STEP 13: FEEDBACK LEARNING
-    INSERT INTO query_feedback(query_id, plan_choice, avg_execution_time, executions, query_type)
-    VALUES (qid, final_plan, exec_time, 1, qtype)
-    ON DUPLICATE KEY UPDATE executions = executions + 1,
-        avg_execution_time = (avg_execution_time * (executions-1) + exec_time) / executions;
+    INSERT INTO query_feedback(query_id, plan_choice, query_type, avg_execution_time, avg_cost, executions)
+    VALUES (qid, final_plan, qtype, exec_time, base_cost, 1)
+    ON DUPLICATE KEY UPDATE
+    executions = executions + 1,
+    avg_execution_time = (avg_execution_time * (executions-1) + exec_time) / executions;
 
+    -- STEP 14: AUTO MV CREATION
+    IF @exec_count >= 5 AND base_cost > 100 THEN
+        IF @qnorm LIKE '%group by product_id%' AND @qnorm LIKE '%sum(revenue)%' THEN
+            SET @mv_name = 'mv_auto_product';
+            IF NOT EXISTS (
+                SELECT 1 FROM mv_dynamic WHERE mv_name = @mv_name
+            ) THEN
+                SET @create_mv = '
+                    CREATE TABLE mv_auto_product AS
+                    SELECT product_id, SUM(revenue) AS total_revenue
+                    FROM order_fact
+                    GROUP BY product_id
+                ';
+                PREPARE stmt FROM @create_mv;
+                EXECUTE stmt;
+                DEALLOCATE PREPARE stmt;
+                INSERT INTO mv_dynamic VALUES (@mv_name, @qnorm, NOW());
+            END IF;
+        END IF;
+    END IF;
+
+    -- STEP 15: AUTO INDEX CREATION
+    IF @exec_count >= 5 AND qtype = 'FILTER' THEN
+        IF @qnorm LIKE '%where product_id%' THEN
+            SET @idx_name = 'idx_auto_product';
+            IF NOT EXISTS (
+                SELECT 1 FROM index_metadata WHERE index_name = @idx_name
+            ) THEN
+                SET @create_idx = '
+                    CREATE INDEX idx_auto_product ON order_fact(product_id)
+                ';
+                PREPARE stmt FROM @create_idx;
+                EXECUTE stmt;
+                DEALLOCATE PREPARE stmt;
+                INSERT INTO index_metadata VALUES (@idx_name, 'order_fact', 'product_id', NOW());
+            END IF;
+        END IF;
+    END IF;
+
+    -- STEP 16: REFRESH MV IF STALE
+    IF final_plan = 'USE_MV' THEN
+        SELECT is_stale INTO @stale
+        FROM mv_metadata
+        WHERE mv_name = 'product_revenue_mv';
+        IF @stale = TRUE THEN
+            DELETE FROM product_revenue_mv;
+            INSERT INTO product_revenue_mv
+            SELECT product_id, SUM(revenue)
+            FROM order_fact
+            GROUP BY product_id;
+            UPDATE mv_metadata
+            SET is_stale = FALSE, last_refresh = NOW()
+            WHERE mv_name = 'product_revenue_mv';
+        END IF;
+    END IF;
 END$$
 DELIMITER ;
