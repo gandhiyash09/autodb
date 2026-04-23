@@ -91,17 +91,16 @@ BEGIN
     SELECT multiplier INTO mult_mv FROM plan_cost_model WHERE plan_name = 'USE_MV' LIMIT 1;
     SELECT multiplier INTO mult_agg FROM plan_cost_model WHERE plan_name = 'AGGREGATE_PUSHDOWN' LIMIT 1;
 
-    -- Normalize and Fingerprint (MySQL 8 REGEXP)
+    -- Query Pattern Normalization
     SET @qnorm = LOWER(TRIM(REPLACE(REPLACE(q, '\n', ' '), '\t', ' ')));
     SET @qnorm = REGEXP_REPLACE(@qnorm, '[0-9]+(\\.[0-9]+)?', '?');
     SET @qnorm = REGEXP_REPLACE(@qnorm, '\'.*?\'', '?');
-    SET @fingerprint = MD5(@qnorm);
     
     -- Workload stats
-    INSERT INTO workload_stats (fingerprint, execution_count, avg_time, avg_cost, last_plan)
-    VALUES (@fingerprint, 1, 0, 0, 'PENDING')
+    INSERT INTO workload_stats (query_pattern, execution_count, avg_time, avg_cost, last_plan)
+    VALUES (@qnorm, 1, 0, 0, 'PENDING')
     ON DUPLICATE KEY UPDATE execution_count = execution_count + 1;
-    SELECT execution_count INTO exec_count FROM workload_stats WHERE fingerprint = @fingerprint;
+    SELECT execution_count INTO exec_count FROM workload_stats WHERE query_pattern = @qnorm;
 
     -- CLASSIFICATION
     IF @qnorm LIKE '%group by%' THEN 
@@ -132,20 +131,20 @@ BEGIN
     -- MV CREATION CONDITION
     -- query repeats >= 5 times, is aggregate, total MV count < 5
     IF v_is_aggregate AND exec_count >= 5 THEN
-        SELECT mv_name, is_stale INTO v_mv_name, v_stale FROM mv_metadata WHERE query_fingerprint = @fingerprint LIMIT 1;
+        SELECT mv_name, is_stale INTO v_mv_name, v_stale FROM mv_metadata WHERE query_pattern = @qnorm LIMIT 1;
         
         IF v_mv_name IS NULL THEN
             SELECT COUNT(*) INTO mv_count FROM mv_metadata;
             IF mv_count < 5 THEN
-                SET v_mv_name = CONCAT('mv_', SUBSTRING(@fingerprint, 1, 8));
+                SET v_mv_name = CONCAT('mv_auto_', mv_count + 1);
                 
                 SET @create_mv_sql = CONCAT('CREATE TABLE ', v_mv_name, ' AS ', q);
                 PREPARE stmt_mv FROM @create_mv_sql;
                 EXECUTE stmt_mv;
                 DEALLOCATE PREPARE stmt_mv;
                 
-                INSERT INTO mv_metadata (mv_name, query_fingerprint, usage_count, is_stale)
-                VALUES (v_mv_name, @fingerprint, 0, FALSE);
+                INSERT INTO mv_metadata (mv_name, query_pattern, usage_count, is_stale)
+                VALUES (v_mv_name, @qnorm, 0, FALSE);
                 
                 SET v_stale = FALSE;
             END IF;
@@ -349,7 +348,7 @@ BEGIN
         improvement_percent
     );
 
-    UPDATE workload_stats SET avg_time = (avg_time + run_time)/2, avg_cost = (avg_cost + chosen_cost)/2, last_plan = final_plan WHERE fingerprint = @fingerprint;
+    UPDATE workload_stats SET avg_time = (avg_time + run_time)/2, avg_cost = (avg_cost + chosen_cost)/2, last_plan = final_plan WHERE query_pattern = @qnorm;
     
     COMMIT;
 END$$

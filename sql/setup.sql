@@ -60,7 +60,7 @@ CREATE TABLE query_log (
 
 CREATE TABLE mv_metadata (
     mv_name VARCHAR(50) PRIMARY KEY,
-    query_fingerprint VARCHAR(64),
+    query_pattern VARCHAR(512) UNIQUE,
     usage_count INT DEFAULT 0,
     is_stale BOOLEAN DEFAULT FALSE,
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -75,7 +75,7 @@ CREATE TABLE index_metadata (
 );
 
 CREATE TABLE workload_stats (
-    fingerprint VARCHAR(64) PRIMARY KEY,
+    query_pattern VARCHAR(512) PRIMARY KEY,
     execution_count INT DEFAULT 0,
     avg_time DOUBLE,
     avg_cost DOUBLE,
