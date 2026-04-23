@@ -12,12 +12,11 @@ def get_connection():
 def execute_sql_file(cursor, filepath):
     with open(filepath, 'r') as f:
         sql_script = f.read()
-    
+
     statements = sql_script.split('$$')
     for stmt in statements:
         if stmt.strip() and not stmt.strip().startswith('DELIMITER'):
             try:
-                # Handle standard semicolon splits inside non-delimiter blocks if needed
                 if 'CREATE PROCEDURE' not in stmt and 'CREATE TRIGGER' not in stmt:
                     sub_stmts = stmt.split(';')
                     for sub in sub_stmts:
@@ -26,33 +25,31 @@ def execute_sql_file(cursor, filepath):
                 else:
                     cursor.execute(stmt.strip())
             except Exception as e:
-                pass # print(f"Error executing statement: {e}")
+                pass
 
 def setup_database():
     print("Connecting to database...")
     conn = get_connection()
     cursor = conn.cursor()
-    
-    # Switch to generic execution to load raw scripts
+
     cursor.execute("DROP DATABASE IF EXISTS autodb_ecommerce;")
     cursor.execute("CREATE DATABASE autodb_ecommerce;")
     cursor.execute("USE autodb_ecommerce;")
-    
+
     import os
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    
+
     print("Building schema from sql/setup.sql...")
     execute_sql_file(cursor, os.path.join(base_dir, 'sql', 'setup.sql'))
-            
+
     print("Building procedures from sql/procedures.sql...")
     with open(os.path.join(base_dir, 'sql', 'procedures.sql'), 'r') as f:
         procs_sql = f.read()
-        # manually executing procedures since multi=True is weird with DELIMITER
         stmts = procs_sql.replace('DELIMITER $$', '').replace('DELIMITER ;', '').split('$$')
         for s in stmts:
             if s.strip():
                 cursor.execute(s.strip())
-                
+
     conn.commit()
     return conn, cursor
 
@@ -89,20 +86,18 @@ def seed_data(conn, cursor):
 
 def generate_workload(conn, cursor):
     print("Generating training workload (200 Queries)...")
-    
-    # Base query templates driving specific paths
+
     templates = [
-        "SELECT product_id, SUM(revenue) AS total_revenue FROM order_fact GROUP BY product_id", # Aggregate -> triggers USE_MV
-        "SELECT product_id, revenue FROM order_fact WHERE product_id = {}", # Filter -> triggers INDEX_SCAN recommendations
-        "SELECT p.product_name, SUM(f.revenue) FROM order_fact f JOIN product_dim p ON f.product_id = p.product_id GROUP BY p.product_name", # Heavy aggregation
-        "SELECT * FROM order_fact WHERE revenue > {}", # FULL_SCAN bypass (range filter selectivity heuristic)
-        "SELECT COUNT(*) FROM order_fact" # Trivial aggregate
+        "SELECT product_id, SUM(revenue) AS total_revenue FROM order_fact GROUP BY product_id",
+        "SELECT product_id, revenue FROM order_fact WHERE product_id = {}",
+        "SELECT p.product_name, SUM(f.revenue) FROM order_fact f JOIN product_dim p ON f.product_id = p.product_id GROUP BY p.product_name",
+        "SELECT * FROM order_fact WHERE revenue > {}",
+        "SELECT COUNT(*) FROM order_fact"
     ]
-    
+
     for i in range(200):
-        # Weight the Aggregate queries heavier to force Dynamic MV creation naturally!
         t = random.choices(templates, weights=[40, 20, 20, 10, 10])[0]
-        
+
         if "{}" in t:
             if "product_id" in t:
                 q = t.format(random.randint(1, 100))
@@ -110,9 +105,8 @@ def generate_workload(conn, cursor):
                 q = t.format(random.randint(10, 150))
         else:
             q = t
-            
-        try:
 
+        try:
             dict_cursor = conn.cursor(dictionary=True)
             exp_rows = 0
             exp_key = 'NONE'
@@ -127,17 +121,14 @@ def generate_workload(conn, cursor):
                 while dict_cursor.nextset(): pass
             except: pass
             finally: dict_cursor.close()
-            
-            # Then run optimizer execution
+
             cursor.execute("CALL optimized_execute(%s, %s, %s, %s)", (q, int(exp_rows), exp_key, exp_type))
             while cursor.nextset(): pass
-            
+
         except Exception as e:
-            pass # print(f"Workload err: {e}")
-            
+            pass
+
     conn.commit()
-    
-    # (Baseline normalization to execution_time dropped as per strict schema enforcement)
     conn.commit()
     print("Workload training generation complete!")
 

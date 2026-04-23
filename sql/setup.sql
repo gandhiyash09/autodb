@@ -2,9 +2,6 @@ DROP DATABASE IF EXISTS autodb_ecommerce;
 CREATE DATABASE autodb_ecommerce;
 USE autodb_ecommerce;
 
--- ==========================================
--- STEP 1: SCHEMAS
--- ==========================================
 CREATE TABLE product_dim (
     product_id INT PRIMARY KEY,
     product_name VARCHAR(100),
@@ -38,9 +35,6 @@ CREATE TABLE order_fact (
     FOREIGN KEY (date_id) REFERENCES date_dim(date_id)
 );
 
--- ==========================================
--- STEP 2: METADATA TABLES
--- ==========================================
 CREATE TABLE query_log (
   id INT AUTO_INCREMENT PRIMARY KEY,
   query_text TEXT,
@@ -55,8 +49,6 @@ CREATE TABLE query_log (
   improvement_percent DOUBLE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-
-
 
 CREATE TABLE mv_metadata (
     mv_name VARCHAR(50) PRIMARY KEY,
@@ -93,8 +85,6 @@ CREATE TABLE column_stats (
     PRIMARY KEY (table_name, column_name)
 );
 
-
-
 CREATE TABLE plan_cost_model (
     plan_name VARCHAR(50) PRIMARY KEY,
     avg_execution_time DOUBLE DEFAULT 0.0,
@@ -107,9 +97,6 @@ INSERT INTO plan_cost_model (plan_name, multiplier) VALUES
 ('USE_MV', 0.05),
 ('AGGREGATE_PUSHDOWN', 0.3);
 
--- ==========================================
--- TRIGGERS FOR STALENESS
--- ==========================================
 DELIMITER $$
 CREATE TRIGGER mark_mv_stale_insert
 AFTER INSERT ON order_fact

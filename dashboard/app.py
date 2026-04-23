@@ -5,7 +5,6 @@ import mysql.connector
 import pandas as pd
 import plotly.express as px
 
-# Ensure backend folder is accessible
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from backend.optimizer_logic import fetch_workload_kpis, parse_improvements
 
@@ -232,7 +231,7 @@ with tab2:
                     if plans[i] != plans[i-1] and plans[i-1] != 'BASELINE':
                         changes.append(f"Plan changed from **{plans[i-1]}** to **{plans[i]}** due to improved cost estimate for query.")
             if changes:
-                for c in changes[-5:]: # Surface top recent changes
+                for c in changes[-5:]:
                     st.success(c)
             else:
                 st.info("No queries found yet.")
