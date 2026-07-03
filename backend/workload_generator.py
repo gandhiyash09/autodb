@@ -1,13 +1,19 @@
 import mysql.connector
 import random
 from datetime import datetime, timedelta
+import getpass  # Secure password input
+
 
 def get_connection():
+    # Prompting the user for their password securely
+    password = getpass.getpass("Enter your MySQL root password: ")
+
     return mysql.connector.connect(
         host="localhost",
         user="root",
-        password="gandhiyash09"
+        password=password
     )
+
 
 def execute_sql_file(cursor, filepath):
     with open(filepath, 'r') as f:
@@ -26,6 +32,7 @@ def execute_sql_file(cursor, filepath):
                     cursor.execute(stmt.strip())
             except Exception as e:
                 pass
+
 
 def setup_database():
     print("Connecting to database...")
@@ -53,10 +60,12 @@ def setup_database():
     conn.commit()
     return conn, cursor
 
+
 def seed_data(conn, cursor):
     print("Inserting dimensions...")
     categories = ['Electronics', 'Clothing', 'Home', 'Toys', 'Sports']
-    products = [(i, f"Product {i}", random.choice(categories), round(random.uniform(10.0, 500.0), 2)) for i in range(1, 101)]
+    products = [(i, f"Product {i}", random.choice(categories), round(random.uniform(10.0, 500.0), 2)) for i in
+                range(1, 101)]
     cursor.executemany("INSERT INTO product_dim VALUES (%s, %s, %s, %s)", products)
 
     regions = ['North', 'South', 'East', 'West']
@@ -66,7 +75,7 @@ def seed_data(conn, cursor):
     start_date = datetime(2023, 1, 1)
     dates = []
     for i in range(1, 731):
-        d = start_date + timedelta(days=i-1)
+        d = start_date + timedelta(days=i - 1)
         dates.append((i, d.strftime('%Y-%m-%d'), d.year, d.month, d.day, f"Q{(d.month - 1) // 3 + 1}"))
     cursor.executemany("INSERT INTO date_dim VALUES (%s, %s, %s, %s, %s, %s)", dates)
     conn.commit()
@@ -74,15 +83,19 @@ def seed_data(conn, cursor):
     print("Inserting 15,000+ facts...")
     orders = []
     for _ in range(15000):
-        orders.append((random.randint(1, 100), random.randint(1, 10), round(random.uniform(5.0, 200.0), 2), random.randint(1, len(dates))))
+        orders.append((random.randint(1, 100), random.randint(1, 10), round(random.uniform(5.0, 200.0), 2),
+                       random.randint(1, len(dates))))
 
     for i in range(0, len(orders), 5000):
-        cursor.executemany("INSERT INTO order_fact (product_id, warehouse_id, revenue, date_id) VALUES (%s, %s, %s, %s)", orders[i:i+5000])
+        cursor.executemany(
+            "INSERT INTO order_fact (product_id, warehouse_id, revenue, date_id) VALUES (%s, %s, %s, %s)",
+            orders[i:i + 5000])
         conn.commit()
 
     print("Generating base stats...")
     cursor.execute("CALL collect_column_stats()")
     conn.commit()
+
 
 def generate_workload(conn, cursor):
     print("Generating training workload (200 Queries)...")
@@ -119,8 +132,10 @@ def generate_workload(conn, cursor):
                     exp_key = str(exp_res[0].get('key') or 'NONE')
                     exp_type = str(exp_res[0].get('type') or 'ALL')
                 while dict_cursor.nextset(): pass
-            except: pass
-            finally: dict_cursor.close()
+            except:
+                pass
+            finally:
+                dict_cursor.close()
 
             cursor.execute("CALL optimized_execute(%s, %s, %s, %s)", (q, int(exp_rows), exp_key, exp_type))
             while cursor.nextset(): pass
@@ -129,8 +144,8 @@ def generate_workload(conn, cursor):
             pass
 
     conn.commit()
-    conn.commit()
     print("Workload training generation complete!")
+
 
 if __name__ == "__main__":
     conn, cursor = setup_database()
